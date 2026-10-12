@@ -21,6 +21,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useAppState } from "@/components/app/app-state"
+import { apiClient } from "@/lib/api-client"
 
 interface AttackStage {
   stage_number: number
@@ -215,21 +216,9 @@ export function AgentSimulationView() {
     }
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/v1/simulation/attack", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-
-      if (res.ok) {
-        const data: AttackSimulationResult = await res.json()
-        setAttackResult(data)
-        setSelectedControls(data.suggested_defenses)
-      } else {
-        const fallback = runFallbackAttack(selectedAssetId, attackScenario, threatIntensity)
-        setAttackResult(fallback)
-        setSelectedControls(fallback.suggested_defenses)
-      }
+      const data = await apiClient.simulateAttack(payload)
+      setAttackResult(data)
+      setSelectedControls(data.suggested_defenses)
     } catch {
       const fallback = runFallbackAttack(selectedAssetId, attackScenario, threatIntensity)
       setAttackResult(fallback)
@@ -259,23 +248,8 @@ export function AgentSimulationView() {
     }
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/v1/simulation/defend", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-
-      if (res.ok) {
-        const data: DefenseSimulationResult = await res.json()
-        setDefenseResult(data)
-      } else {
-        const fallback = runFallbackDefense(
-          attackResult.asset_id,
-          attackResult.simulated_risk_score,
-          selectedControls
-        )
-        setDefenseResult(fallback)
-      }
+      const data = await apiClient.simulateDefense(payload)
+      setDefenseResult(data)
     } catch {
       const fallback = runFallbackDefense(
         attackResult.asset_id,

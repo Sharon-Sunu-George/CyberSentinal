@@ -19,6 +19,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { useAppState } from "@/components/app/app-state"
+import { apiClient } from "@/lib/api-client"
 
 export interface QuestionnaireForm {
   org_name: string
@@ -69,7 +70,7 @@ const DEFAULT_FORM: QuestionnaireForm = {
 }
 
 export function RiskAssessmentView() {
-  const { navigate } = useAppState()
+  const { navigate, recordRiskAssessment } = useAppState()
   const [form, setForm] = useState<QuestionnaireForm>(DEFAULT_FORM)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -119,21 +120,14 @@ export function RiskAssessmentView() {
 
     try {
       // Send questionnaire to FastAPI risk engine
-      const res = await fetch("http://127.0.0.1:8000/api/v1/risk/assess", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-
-      if (res.ok) {
-        await res.json()
-      }
-    } catch {
-      // Backend may be offline in demo mode; proceed safely
+      const data = await apiClient.assessRisk(payload)
+      recordRiskAssessment(data)
+      navigate("overview")
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to connect to risk assessment engine"
+      setError(`Quantification failed: ${msg}. Please ensure the FastAPI backend is running on http://127.0.0.1:8010.`)
     } finally {
       setLoading(false)
-      // Navigate to existing Executive Overview dashboard after submission
-      navigate("overview")
     }
   }
 
@@ -185,6 +179,17 @@ export function RiskAssessmentView() {
             Provide organization context, asset classification, and security control signals to calibrate the risk quantification engine.
           </p>
         </div>
+
+        {/* Clear Error Feedback Banner */}
+        {error && (
+          <div className="flex items-start gap-2.5 rounded-lg border border-destructive/30 bg-destructive/10 p-3.5 text-xs text-destructive">
+            <ShieldAlert className="size-4 shrink-0 mt-0.5" />
+            <div className="flex-1 space-y-0.5">
+              <p className="font-semibold">Assessment Request Failed</p>
+              <p className="text-destructive/90">{error}</p>
+            </div>
+          </div>
+        )}
 
         {/* Questionnaire Form */}
         <form onSubmit={handleSubmit} className="space-y-6">

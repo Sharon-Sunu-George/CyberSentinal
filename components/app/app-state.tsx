@@ -20,6 +20,7 @@ import {
 import { assess, deriveSecurityGaps } from "@/lib/risk"
 import { runScenario, threatScenarios } from "@/lib/simulation"
 import type { ActivityEvent, Assessment, Dataset, SecurityGap, ViewId } from "@/lib/types"
+import { apiClient, type BackendRiskAssessmentResponse } from "@/lib/api-client"
 
 const DEFAULT_AUTO_REFRESH_INTERVAL_SEC = 60
 const ASSESSMENT_DELAY_MS = 500
@@ -58,7 +59,7 @@ interface State {
 type Action =
   | { type: "navigate"; view: ViewId; analystAssetId?: string }
   | { type: "assess-start" }
-  | { type: "assess-complete"; at: string }
+  | { type: "assess-complete"; at: string; backendResult?: BackendRiskAssessmentResponse }
   | { type: "simulate-tick"; at: string }
   | { type: "simulate-scenario"; at: string }
   | { type: "record-remediation"; vulnerabilityId: string; at: string }
@@ -72,6 +73,7 @@ function loadPersistedState(): Partial<State> {
   if (typeof window === "undefined") return {}
   try {
     const savedDataset = localStorage.getItem(STORAGE_KEYS.DATASET)
+    const savedAssessment = localStorage.getItem(STORAGE_KEYS.ASSESSMENT)
     const savedActivity = localStorage.getItem(STORAGE_KEYS.ACTIVITY)
     const savedTrend = localStorage.getItem(STORAGE_KEYS.TREND)
     const savedAutoRefresh = localStorage.getItem(STORAGE_KEYS.AUTO_REFRESH)
@@ -79,6 +81,7 @@ function loadPersistedState(): Partial<State> {
 
     return {
       dataset: savedDataset ? JSON.parse(savedDataset) : undefined,
+      assessment: savedAssessment ? JSON.parse(savedAssessment) : undefined,
       activity: savedActivity ? JSON.parse(savedActivity) : undefined,
       trendHistory: savedTrend ? JSON.parse(savedTrend) : undefined,
       autoRefreshEnabled: savedAutoRefresh !== null ? JSON.parse(savedAutoRefresh) : undefined,
@@ -93,6 +96,7 @@ function saveStateToStorage(state: State) {
   if (typeof window === "undefined") return
   try {
     localStorage.setItem(STORAGE_KEYS.DATASET, JSON.stringify(state.dataset))
+    localStorage.setItem(STORAGE_KEYS.ASSESSMENT, JSON.stringify(state.assessment))
     localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(state.activity))
     localStorage.setItem(STORAGE_KEYS.TREND, JSON.stringify(state.trendHistory))
     localStorage.setItem(STORAGE_KEYS.AUTO_REFRESH, JSON.stringify(state.autoRefreshEnabled))
@@ -106,11 +110,33 @@ function initState(): State {
   const persisted = loadPersistedState()
   const dataset = persisted.dataset || initialDataset
   const baseAssessment = assess(dataset, SIMULATED_BASE_TIME)
+  if (!baseAssessment.backendResult) {
+    baseAssessment.backendResult = {
+      scenario_name: "FinSecure Technologies - Customer Core Banking & PII Database Risk Evaluation",
+      asset_name: "Customer Core Banking & PII Database",
+      asset_value: 5000000,
+      metrics: {
+        loss_event_frequency: 0.7,
+        single_loss_expectancy: 450000,
+        annual_loss_expectancy: 315000,
+        mitigated_annual_loss_expectancy: 90000,
+        annual_risk_reduction: 225000,
+        security_roi_percentage: 350,
+      },
+      assumptions: [
+        "Threat Event Frequency (TEF): 2.00 attempts/year.",
+        "Baseline Vulnerability Probability: 35.0%.",
+        "Single Loss Expectancy (SLE): $450,000.00 per event ($150,000.00 direct + $300,000.00 indirect).",
+        "Linear Loss Event Frequency (LEF = TEF * Vulnerability) assumed under standard FAIR principles.",
+      ],
+      recommendation: "RECOMMENDED: Deploy security controls. The proposed investment of $50,000.00 yields an estimated annual financial risk reduction of $225,000.00 (Net ROI: 350.0%).",
+    }
+  }
 
   return {
     view: "landing",
     dataset,
-    assessment: baseAssessment,
+    assessment: persisted.assessment || baseAssessment,
     previousAssessment: null,
     activity: persisted.activity || initialActivity,
     trendHistory: persisted.trendHistory || initialRiskTrendHistory,
@@ -145,13 +171,20 @@ function reducer(state: State, action: Action): State {
 
     case "assess-complete": {
       const next = assess(state.dataset, action.at)
+      if (action.backendResult) {
+        next.backendResult = action.backendResult
+      }
       const delta = next.overallScore - state.assessment.overallScore
       const event: ActivityEvent = {
         id: `evt-assess-${action.at}`,
         at: action.at,
         kind: "assessment",
-        title: "Periodic risk assessment completed",
-        description: `Re-assessed ${next.assetRisks.length} assets and telemetry signals. Overall risk ${state.assessment.overallScore} → ${next.overallScore}${delta === 0 ? " (stable)" : ""}.`,
+        title: action.backendResult
+          ? `FAIR risk assessment quantified: ${action.backendResult.asset_name}`
+          : "Periodic risk assessment completed",
+        description: action.backendResult
+          ? `Quantified ALE: $${action.backendResult.metrics.annual_loss_expectancy.toLocaleString()} (SLE: $${action.backendResult.metrics.single_loss_expectancy.toLocaleString()}, LEF: ${action.backendResult.metrics.loss_event_frequency}/yr). ${action.backendResult.recommendation}`
+          : `Re-assessed ${next.assetRisks.length} assets and telemetry signals. Overall risk ${state.assessment.overallScore} → ${next.overallScore}${delta === 0 ? " (stable)" : ""}.`,
         severity: "Info",
         overallChange: { before: state.assessment.overallScore, after: next.overallScore },
       }
@@ -294,6 +327,7 @@ interface AppContextValue extends State {
   scenariosRemaining: number
   navigate: (view: ViewId, analystAssetId?: string) => void
   runAssessment: () => void
+  recordRiskAssessment: (backendResult: BackendRiskAssessmentResponse) => void
   simulateThreat: () => void
   toggleAutoRefresh: () => void
   recordRemediation: (vulnerabilityId: string) => void
@@ -322,9 +356,48 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0 })
   }, [])
 
-  const runAssessment = useCallback(() => {
-    withAssessment((at) => ({ type: "assess-complete", at }))
-  }, [withAssessment])
+  const runAssessment = useCallback(async () => {
+    if (busyRef.current) return
+    busyRef.current = true
+    dispatch({ type: "assess-start" })
+
+    // Find top asset from current dataset to evaluate against real FastAPI risk engine
+    const topAsset = state.dataset.assets[0]
+    const openVulns = state.dataset.vulnerabilities.filter((v) => v.assetId === topAsset?.id && !v.remediated)
+    const vulnProb = openVulns.length > 0 ? Math.min(1.0, 0.2 + openVulns.length * 0.1) : 0.25
+
+    let backendResult: BackendRiskAssessmentResponse | undefined = undefined
+    try {
+      backendResult = await apiClient.assessRisk({
+        scenario_name: `${topAsset?.name || "Critical Enterprise Infrastructure"} Quantitative Risk Assessment`,
+        asset_name: topAsset?.name || "Payment Production Server",
+        asset_value: 5000000,
+        threat_event_frequency: topAsset ? topAsset.threatEvidence * 3.0 : 2.0,
+        vulnerability_probability: vulnProb,
+        direct_loss: 150000,
+        indirect_loss: 300000,
+        proposed_security_cost: 50000,
+        mitigated_vulnerability_probability: 0.1,
+      })
+    } catch {
+      // Backend error will not crash assessment; continue with local dataset
+    }
+
+    dispatch({
+      type: "assess-complete",
+      at: new Date().toISOString(),
+      backendResult,
+    })
+    busyRef.current = false
+  }, [state.dataset])
+
+  const recordRiskAssessment = useCallback((backendResult: BackendRiskAssessmentResponse) => {
+    dispatch({
+      type: "assess-complete",
+      at: new Date().toISOString(),
+      backendResult,
+    })
+  }, [])
 
   const simulateThreat = useCallback(() => {
     withAssessment((at) => ({ type: "simulate-scenario", at }))
@@ -377,13 +450,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       scenariosRemaining: threatScenarios.length - (state.scenarioIndex % threatScenarios.length),
       navigate,
       runAssessment,
+      recordRiskAssessment,
       simulateThreat,
       toggleAutoRefresh,
       recordRemediation,
       markRead,
       reset,
     }),
-    [state, gaps, navigate, runAssessment, simulateThreat, toggleAutoRefresh, recordRemediation, markRead, reset],
+    [state, gaps, navigate, runAssessment, recordRiskAssessment, simulateThreat, toggleAutoRefresh, recordRemediation, markRead, reset],
   )
 
   return <AppContext value={value}>{children}</AppContext>
