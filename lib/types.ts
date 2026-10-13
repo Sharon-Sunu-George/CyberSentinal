@@ -84,6 +84,21 @@ export interface Assessment {
   criticalAssetCount: number
   openVulnerabilityCount: number
   openHighSeverityIncidents: number
+  backendResult?: {
+    scenario_name: string
+    asset_name: string
+    asset_value: number
+    metrics: {
+      loss_event_frequency: number
+      single_loss_expectancy: number
+      annual_loss_expectancy: number
+      mitigated_annual_loss_expectancy?: number | null
+      annual_risk_reduction?: number | null
+      security_roi_percentage?: number | null
+    }
+    assumptions: string[]
+    recommendation: string
+  }
 }
 
 export interface SecurityGapDefinition {
