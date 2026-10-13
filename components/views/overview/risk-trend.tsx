@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
+import { TrendingDown, TrendingUp } from "lucide-react"
 import { useAppState } from "@/components/app/app-state"
-import { DemoTag } from "@/components/app/badges"
+import { DemoTag, LevelBadge, scoreColor } from "@/components/app/badges"
 import { Panel } from "@/components/app/panel"
 
 export function RiskTrend({ className }: { className?: string }) {
@@ -27,7 +28,6 @@ export function RiskTrend({ className }: { className?: string }) {
       // Ornstein-Uhlenbeck / Mean-Reverting Random Walk:
       // dX = -theta * X + noise
       // theta = 0.35 (pulls offset back toward 0)
-      // noise is typically ±0.1 to ±0.4, with occasional step up to ±0.8
       const current = offsetRef.current
       const meanReversionPull = -0.35 * current
 
@@ -35,17 +35,14 @@ export function RiskTrend({ className }: { className?: string }) {
       const r = Math.random()
       let rawStep: number
       if (r < 0.85) {
-        // Normal subtle step between ±0.1 and ±0.4
-        rawStep = (Math.random() * 0.5 - 0.25)
+        rawStep = Math.random() * 0.5 - 0.25
       } else {
-        // Occasional slightly larger micro-fluctuation (up to ±0.8)
-        rawStep = (Math.random() * 1.2 - 0.6)
+        rawStep = Math.random() * 1.2 - 0.6
       }
 
       // Calculate next bounded offset (bounded strictly within [-1.5, +1.5] around official score)
       let next = current + meanReversionPull + rawStep
       next = Math.max(-1.5, Math.min(1.5, next))
-      // Round to 1 decimal place to match score precision
       next = Number(next.toFixed(1))
 
       offsetRef.current = next
@@ -84,12 +81,13 @@ export function RiskTrend({ className }: { className?: string }) {
 
   const first = data[0]?.officialScore ?? assessment.overallScore
   const change = Number((assessment.overallScore - first).toFixed(1))
+  const isUp = change > 0
 
   return (
     <Panel
       className={className}
-      title="Seven-day risk trend"
-      description={`Overall risk score ${change >= 0 ? "up" : "down"} ${Math.abs(change)} points over 7 days. Today reflects official assessment score (${assessment.overallScore}/100) with live telemetry.`}
+      title="Seven-Day Risk Trend"
+      description={`Official risk score is ${assessment.overallScore}/100 (${isUp ? "+" : ""}${change} pts over 7 days). Reference line marks Critical threshold (80).`}
       action={
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
@@ -100,13 +98,48 @@ export function RiskTrend({ className }: { className?: string }) {
         </div>
       }
     >
-      <div className="h-56" role="img" aria-label={`Risk trend: ${data.map((d) => `${d.day} ${d.score}`).join(", ")}`}>
+      {/* Visual Header Metrics Banner */}
+      <div className="mb-4 grid grid-cols-3 gap-2 rounded-md border border-border/50 bg-muted/20 p-2.5 text-xs">
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">Current Risk</span>
+          <span className="mt-0.5 font-mono text-sm font-bold text-foreground">
+            {assessment.overallScore}/100
+          </span>
+        </div>
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">7-Day Trajectory</span>
+          <span className="mt-0.5 inline-flex items-center gap-1 font-mono text-xs font-semibold text-foreground">
+            {change === 0 ? (
+              "No net change"
+            ) : (
+              <>
+                {isUp ? (
+                  <TrendingUp className="size-3 text-destructive" />
+                ) : (
+                  <TrendingDown className="size-3 text-success" />
+                )}
+                <span className={isUp ? "text-destructive" : "text-success"}>
+                  {isUp ? "+" : ""}{change} pts
+                </span>
+              </>
+            )}
+          </span>
+        </div>
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">Critical Line</span>
+          <span className="mt-0.5 font-mono text-xs font-semibold text-destructive">
+            ≥ 80 Score
+          </span>
+        </div>
+      </div>
+
+      <div className="h-60 w-full" role="img" aria-label={`Risk trend: ${data.map((d) => `${d.day} ${d.score}`).join(", ")}`}>
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ left: -16, right: 8, top: 8, bottom: 0 }}>
+          <AreaChart data={data} margin={{ left: -16, right: 12, top: 10, bottom: 0 }}>
             <defs>
               <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--high)" stopOpacity={0.25} />
-                <stop offset="100%" stopColor="var(--high)" stopOpacity={0} />
+                <stop offset="0%" stopColor="var(--high)" stopOpacity={0.3} />
+                <stop offset="100%" stopColor="var(--high)" stopOpacity={0.0} />
               </linearGradient>
             </defs>
             <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
@@ -126,8 +159,13 @@ export function RiskTrend({ className }: { className?: string }) {
               y={80}
               stroke="var(--destructive)"
               strokeDasharray="4 4"
-              strokeOpacity={0.6}
-              label={{ value: "Critical", fill: "var(--destructive)", fontSize: 10, position: "insideTopRight" }}
+              strokeOpacity={0.8}
+              label={{
+                value: "Critical (80)",
+                fill: "var(--destructive)",
+                fontSize: 10,
+                position: "insideTopRight",
+              }}
             />
             <Tooltip
               contentStyle={{
@@ -136,7 +174,7 @@ export function RiskTrend({ className }: { className?: string }) {
                 borderRadius: 6,
                 fontSize: 12,
               }}
-              labelStyle={{ color: "var(--foreground)" }}
+              labelStyle={{ color: "var(--foreground)", fontWeight: 600 }}
               itemStyle={{ color: "var(--muted-foreground)" }}
               formatter={(v, _name, item) => {
                 const payload = item?.payload
@@ -146,17 +184,17 @@ export function RiskTrend({ className }: { className?: string }) {
                     "Live Telemetry",
                   ]
                 }
-                return [`${v}/100`, "Assessed risk"]
+                return [`${v}/100`, "Assessed Risk"]
               }}
             />
             <Area
               type="monotone"
               dataKey="score"
               stroke="var(--high)"
-              strokeWidth={2}
+              strokeWidth={2.5}
               fill="url(#trendFill)"
-              dot={{ r: 3, fill: "var(--high)", strokeWidth: 0 }}
-              activeDot={{ r: 4 }}
+              dot={{ r: 3.5, fill: "var(--high)", strokeWidth: 0 }}
+              activeDot={{ r: 5 }}
               isAnimationActive={true}
               animationDuration={600}
               animationEasing="ease-out"
