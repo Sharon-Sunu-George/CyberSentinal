@@ -87,6 +87,16 @@ class AttackerAgentService:
 
         target_class = request.target_class or scan_meta.get("target_class", "public")
 
+        # Evaluate Website Trust, Scam, Phishing, and Impersonation
+        from app.services.attacker.trust_engine import WebsiteTrustService
+        trust_service = WebsiteTrustService()
+        trust_assessment = trust_service.evaluate_trust(
+            target_url=normalized_url,
+            current_scan_id=actual_scan_id,
+            final_url=scan_meta.get("final_url"),
+            redirect_chain=scan_meta.get("redirect_chain"),
+        )
+
         response = AttackerScanResponse(
             scan_id=actual_scan_id,
             target_url=request.target_url,
@@ -104,6 +114,7 @@ class AttackerAgentService:
             findings=findings,
             inferred_attack_scenarios=inferred_scenarios,
             defender_handover=defender_handover,
+            trust_assessment=trust_assessment,
         )
 
         # Persist completed scan record
@@ -122,6 +133,7 @@ class AttackerAgentService:
             "summary": summary.model_dump(),
             "findings": [f.model_dump() for f in findings],
             "inferred_attack_scenarios": [s.model_dump() for s in inferred_scenarios],
+            "trust_assessment": trust_assessment.model_dump(),
         })
 
         return response

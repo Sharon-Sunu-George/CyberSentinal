@@ -142,6 +142,49 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         "rollback_guidance": "If application scripts or styles break, immediately revert to Content-Security-Policy-Report-Only or remove the header directive and reload web server.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i content-security-policy",
     },
+    "VULN-SEC-HDR-WEAK-CSP": {
+        "root_cause": "The Content-Security-Policy header permits 'unsafe-inline' or 'unsafe-eval' script execution, significantly weakening cross-site scripting (XSS) defenses.",
+        "why_it_matters": "Allowing unsafe-inline or unsafe-eval allows injected scripts to execute within the security context of the user, defeating the primary protection mechanism of CSP.",
+        "actionable_fix": "Refactor inline scripts and eval() patterns to use cryptographic script nonces (e.g. 'nonce-rAnd0m123') or strict cryptographic hashes ('sha256-...').",
+        "implementation_steps": [
+            "1. Audit application code for inline <script> tags, inline event handlers (onclick=...), and javascript: URLs.",
+            "2. Generate cryptographically random nonces per HTTP request at server/middleware level.",
+            "3. Update Content-Security-Policy header: replace 'unsafe-inline' with 'nonce-{random}' or 'strict-dynamic'.",
+            "4. Eliminate any eval() or Function() constructor calls in client-side code.",
+        ],
+        "code_snippets": {
+            "Nginx": (
+                "# Example injecting per-request cryptographic nonce with ngx_http_sub_module\n"
+                "add_header Content-Security-Policy \"default-src 'self'; script-src 'self' 'nonce-$request_id'; object-src 'none';\" always;"
+            ),
+            "Express": (
+                "const crypto = require('crypto');\n"
+                "app.use((req, res, next) => {\n"
+                "  res.locals.cspNonce = crypto.randomBytes(16).toString('hex');\n"
+                "  helmet.contentSecurityPolicy({\n"
+                "    directives: {\n"
+                "      scriptSrc: [\"'self'\", `'nonce-${res.locals.cspNonce}'`],\n"
+                "    },\n"
+                "  })(req, res, next);\n"
+                "});"
+            ),
+            "Next.js": (
+                "// In middleware.ts:\n"
+                "const nonce = Buffer.from(crypto.randomUUID()).toString('base64');\n"
+                "const cspHeader = `default-src 'self'; script-src 'self' 'nonce-${nonce}' 'strict-dynamic'; object-src 'none';`;\n"
+                "requestHeaders.set('x-nonce', nonce);\n"
+                "requestHeaders.set('Content-Security-Policy', cspHeader);"
+            ),
+        },
+        "effort_hours": 4.0,
+        "service_cost": 0.0,
+        "file_or_config_location": "Application templating/middleware (middleware.ts, server.js) and frontend build configuration",
+        "dependencies": ["Audit of inline scripts and UI build tools"],
+        "dependencies_and_side_effects": "Removing 'unsafe-inline' without providing nonces or hashes will block legitimate inline scripts and third-party widgets. Test thoroughly in staging.",
+        "assumptions": ["Web framework supports per-request header generation"],
+        "rollback_guidance": "Temporarily restore 'unsafe-inline' if production features fail while scripts are refactored.",
+        "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i content-security-policy (verify unsafe-inline is absent)",
+    },
     "VULN-SEC-HDR-NO-XFO": {
         "root_cause": "The web application does not specify X-Frame-Options or CSP frame-ancestors, permitting third-party sites to render it inside hidden iframes.",
         "why_it_matters": "Clickjacking attacks lure authenticated users into clicking on invisible iframe overlays, triggering unintended financial transfers, permission grants, or account changes.",
@@ -323,6 +366,26 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         "dependencies": [],
         "assumptions": ["Client-side JavaScript does not legitimately need to read raw session tokens"],
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i set-cookie (verify '; HttpOnly' is present)",
+    },
+    "VULN-INFO-SERVER-BANNER": {
+        "root_cause": "The web server emits a general product name in the 'Server' HTTP response banner without revealing a specific version number.",
+        "actionable_fix": "Configure web server directives or reverse proxy to suppress the Server header.",
+        "implementation_steps": [
+            "1. In Nginx, set 'server_tokens off;' or use proxy_hide_header Server.",
+            "2. In Apache, set 'ServerTokens Prod' and 'ServerSignature Off'.",
+            "3. At edge CDN (Cloudflare, CloudFront), configure a response transform rule to remove the Server header.",
+        ],
+        "code_snippets": {
+            "Nginx": "http {\n    server_tokens off;\n    # or in reverse proxy location:\n    proxy_hide_header Server;\n}",
+            "Apache": "ServerTokens Prod\nServerSignature Off",
+        },
+        "effort_hours": 1.0,
+        "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration (nginx.conf / httpd.conf) or reverse proxy edge",
+        "dependencies": ["Web server configuration access"],
+        "assumptions": ["Clients do not rely on Server banner header values"],
+        "rollback_guidance": "Remove directive and reload web server.",
+        "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i server",
     },
     "VULN-INFO-SERVER-VERSION": {
         "root_cause": "The web server emits detailed product name and version numbers in the 'Server' HTTP response banner.",

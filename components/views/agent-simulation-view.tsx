@@ -294,6 +294,9 @@ export function AgentSimulationView() {
 
             // Handover actual findings to Defender Agent
             runDefenderAnalysis(fullRecord.scan_id, fullRecord.target_url, fullRecord.findings, availableBudget, hourlyRate)
+
+            // Navigate to dedicated results page for this specific scan
+            navigate("assessment-report", undefined, scanId)
           } else if (prog.status === "failed") {
             stopPolling()
             setIsScanning(false)
@@ -886,21 +889,21 @@ export function AgentSimulationView() {
                   </span>
                 </div>
                 <CardDescription className="text-xs text-foreground/80 mt-1 leading-relaxed">
-                  The <strong>Attacker Agent</strong> executes real passive socket/TLS and header inspections against your explicitly authorized web perimeter.
-                  The <strong>Defender Agent</strong> consumes concrete findings, calculates technical implementation costs, and prioritizes remediation to maximize risk reduction within your budget.
+                  The <strong>Attack Surface Scanner</strong> executes real passive socket/TLS and header inspections against your explicitly authorized web perimeter.
+                  The <strong>Remediation Planner</strong> consumes concrete findings, calculates technical implementation costs, and prioritizes remediation to maximize risk reduction within your budget.
                 </CardDescription>
               </CardHeader>
             </Card>
 
-            {/* Side-by-side Dual Agent Panels */}
+            {/* Side-by-side Dual Panels */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* PANEL 1: ATTACKER AGENT */}
+              {/* PANEL 1: ATTACK SURFACE SCANNER */}
               <Card className="border-destructive/30 bg-card flex flex-col justify-between">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-destructive font-semibold text-base">
                       <Sparkles className="size-5" />
-                      <span>Attacker Agent — Real Website Scanner</span>
+                      <span>Attack Surface Scanner — Real Website Assessment</span>
                     </div>
                     {scanStatus === "running" && (
                       <span className="text-[11px] font-mono font-semibold text-destructive flex items-center gap-1">
@@ -1080,29 +1083,41 @@ export function AgentSimulationView() {
                       )}
 
                       {scanResult && !isScanning && (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={handleRescan}
-                          className="text-xs"
-                          title="Run Authorized Rescan to verify fixes"
-                        >
-                          <RefreshCw className="size-3.5 mr-1" />
-                          Rescan
-                        </Button>
+                        <>
+                          <Button
+                            type="button"
+                            variant="default"
+                            onClick={() => navigate("assessment-report", undefined, scanResult.scan_id)}
+                            className="text-xs bg-primary text-primary-foreground font-semibold"
+                            title="View Dedicated Scan Report"
+                          >
+                            <FileText className="size-3.5 mr-1" />
+                            View Results Report
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={handleRescan}
+                            className="text-xs"
+                            title="Run Authorized Rescan to verify fixes"
+                          >
+                            <RefreshCw className="size-3.5 mr-1" />
+                            Rescan
+                          </Button>
+                        </>
                       )}
                     </div>
                   </form>
                 </CardContent>
               </Card>
 
-              {/* PANEL 2: DEFENDER AGENT */}
+              {/* PANEL 2: REMEDIATION PLANNER */}
               <Card className="border-primary/30 bg-card flex flex-col justify-between">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-primary font-semibold text-base">
                       <Workflow className="size-5" />
-                      <span>Defender Agent — Remediation Engine</span>
+                      <span>Remediation Planner — Remediation Engine</span>
                     </div>
                     {isAnalyzingDefender && (
                       <span className="text-[11px] font-mono font-semibold text-primary flex items-center gap-1">
@@ -1192,9 +1207,9 @@ export function AgentSimulationView() {
                   {!scanResult && (
                     <div className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground space-y-2">
                       <Workflow className="size-8 mx-auto text-muted-foreground/50" />
-                      <p className="font-semibold text-foreground">Waiting for Attacker Scan Findings</p>
+                      <p className="font-semibold text-foreground">Waiting for Attack Surface Findings</p>
                       <p className="text-[11px] max-w-xs mx-auto">
-                        Initiate a scan against your authorized website on the left. The Defender Agent will immediately ingest the empirical findings and formulate an actionable plan.
+                        Initiate a scan against your authorized website on the left. The Remediation Planner will immediately ingest the empirical findings and formulate an actionable plan.
                       </p>
                     </div>
                   )}
@@ -1503,6 +1518,12 @@ export function AgentSimulationView() {
                                     <span className="text-foreground">{finding.evidence.check_type}</span>
                                   </div>
                                   <div>
+                                    <span className="text-muted-foreground">Evidence Source: </span>
+                                    <span className="text-foreground uppercase font-semibold text-[9px] px-1 py-0.2 rounded bg-muted border">
+                                      {finding.evidence.evidence_source || "direct_observation"}
+                                    </span>
+                                  </div>
+                                  <div>
                                     <span className="text-muted-foreground">HTTP Status: </span>
                                     <span className="text-foreground">{finding.evidence.status_code ?? "N/A"}</span>
                                   </div>
@@ -1514,7 +1535,50 @@ export function AgentSimulationView() {
                                     <span className="text-muted-foreground">Final URL: </span>
                                     <span className="text-foreground break-all">{finding.evidence.final_url || finding.affected_url_or_component}</span>
                                   </div>
+                                  {finding.occurrence_count && finding.occurrence_count > 1 && (
+                                    <div>
+                                      <span className="text-muted-foreground">Occurrences: </span>
+                                      <span className="text-primary font-bold">{finding.occurrence_count} instances</span>
+                                    </div>
+                                  )}
                                 </div>
+
+                                {finding.severity_reason && (
+                                  <div>
+                                    <span className="text-muted-foreground">Severity Rationale: </span>
+                                    <span className="text-foreground/90 font-medium">{finding.severity_reason}</span>
+                                  </div>
+                                )}
+
+                                {(finding.evidence.observed_value || finding.evidence.expected_condition) && (
+                                  <div className="bg-muted/20 rounded p-2 border border-border/40 space-y-1 text-[10px]">
+                                    {finding.evidence.observed_value && (
+                                      <div>
+                                        <span className="text-amber-400 font-semibold">Observed: </span>
+                                        <span className="text-foreground/90 break-all">{finding.evidence.observed_value}</span>
+                                      </div>
+                                    )}
+                                    {finding.evidence.expected_condition && (
+                                      <div>
+                                        <span className="text-emerald-400 font-semibold">Expected: </span>
+                                        <span className="text-foreground/90 break-all">{finding.evidence.expected_condition}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {finding.affected_urls && finding.affected_urls.length > 1 && (
+                                  <div>
+                                    <p className="text-muted-foreground mb-1">// All Affected URLs ({finding.affected_urls.length}):</p>
+                                    <div className="bg-muted/30 rounded p-1.5 border border-border/30 space-y-0.5 text-[10px] max-h-24 overflow-y-auto">
+                                      {finding.affected_urls.map((u, i) => (
+                                        <div key={i} className="text-primary truncate font-mono">
+                                          • {u}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
 
                                 {finding.evidence.check_result && (
                                   <div>

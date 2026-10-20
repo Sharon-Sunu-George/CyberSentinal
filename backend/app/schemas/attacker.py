@@ -4,11 +4,15 @@ from pydantic import BaseModel, Field
 
 class FindingEvidence(BaseModel):
     check_type: str = Field(..., description="Type of security check, e.g. 'security_headers', 'cookie_flags', 'tls_configuration', 'info_disclosure', 'robots_txt', 'cors'")
+    evidence_source: str = Field(default="direct_observation", description="'direct_observation', 'inference', or 'manual_review'")
+    observed_value: Optional[str] = Field(None, description="Actual observed wire value or header condition")
+    expected_condition: Optional[str] = Field(None, description="Expected security baseline condition or RFC requirement")
     observed_data: Dict[str, Any] = Field(default_factory=dict, description="Concrete empirical data observed from response")
     raw_snippet: Optional[str] = Field(None, description="Relevant excerpt, header snippet, or wire observation")
     status_code: Optional[int] = Field(None, description="HTTP status code associated with probe")
     requested_url: Optional[str] = Field(None, description="Original target URL requested")
     final_url: Optional[str] = Field(None, description="Final resolved URL after redirects")
+    redirect_chain: List[Dict[str, Any]] = Field(default_factory=list, description="Observed redirect hops: from_url, to_url, status_code")
     observed_headers: Dict[str, str] = Field(default_factory=dict, description="Observed response headers relevant to this check")
     check_result: Optional[str] = Field(None, description="Evaluation outcome summary: e.g. 'Confirmed observation', 'Potential risk', 'Inconclusive', 'Scan error'")
     confidence_reason: Optional[str] = Field(None, description="Detailed reasoning explaining the confidence level and factual grounding")
@@ -21,8 +25,12 @@ class VulnerabilityFinding(BaseModel):
     title: str = Field(..., description="Concise finding title")
     category: str = Field(..., description="Category, e.g. 'Security Headers', 'Transport Security', 'Session Management', 'Information Disclosure', 'Outdated Software', 'Access Control'")
     severity: str = Field(..., description="'Critical', 'High', 'Medium', 'Low', or 'Info'")
+    severity_reason: Optional[str] = Field(None, description="Deterministic calibration rationale explaining the assigned severity")
     confidence: str = Field(..., description="'High', 'Medium', or 'Low'")
     affected_url_or_component: str = Field(..., description="URL path or component affected")
+    affected_urls: List[str] = Field(default_factory=list, description="All deduplicated URLs where this exact issue was observed")
+    occurrence_count: int = Field(default=1, description="Number of observed occurrences across crawled pages")
+    fingerprint: Optional[str] = Field(None, description="Stable fingerprint hash for deduplicating identical security issues")
     evidence: FindingEvidence = Field(..., description="Empirical evidence supporting this finding")
     potential_impact: str = Field(..., description="Explanation of potential security and business impact")
     remediation: str = Field(..., description="Actionable technical recommendation to fix the issue")
@@ -141,6 +149,9 @@ class AttackerScanRequest(BaseModel):
 
 
 
+from app.schemas.trust import WebsiteTrustAssessment
+
+
 class AttackerScanResponse(BaseModel):
     scan_id: str
     target_url: str
@@ -170,5 +181,9 @@ class AttackerScanResponse(BaseModel):
     defender_handover: Dict[str, Any] = Field(
         default_factory=dict,
         description="Structured finding data formatted for consumption by the Defender Agent"
+    )
+    trust_assessment: Optional[WebsiteTrustAssessment] = Field(
+        default=None,
+        description="Dedicated website trust, phishing, scam and impersonation assessment"
     )
 

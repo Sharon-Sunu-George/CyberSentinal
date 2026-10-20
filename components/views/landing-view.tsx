@@ -82,7 +82,7 @@ export function LandingView() {
             </div>
           </button>
 
-          {/* Card 3: AI Agent Simulation */}
+          {/* Card 3: Attack Surface Scanner & Remediation Planner */}
           <button
             type="button"
             onClick={() => navigate("agent-simulation")}
@@ -93,14 +93,14 @@ export function LandingView() {
                 <Bot className="size-6" aria-hidden="true" />
               </div>
               <h2 className="text-lg font-semibold text-foreground group-hover:text-warning">
-                AI Agent Simulation
+                Attack Surface & Remediation
               </h2>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                Explore AI-powered security analysis and simulation tools.
+                Attack Surface Scanner and Remediation Planner for web security assessments.
               </p>
             </div>
             <div className="mt-6 flex w-full items-center text-xs font-medium text-warning">
-              <span>Explore Simulation</span>
+              <span>Launch Assessment Engine</span>
               <ArrowRight className="ml-1.5 size-3.5 transition-transform group-hover:translate-x-1" aria-hidden="true" />
             </div>
           </button>

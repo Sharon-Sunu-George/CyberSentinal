@@ -25,7 +25,7 @@ from app.schemas.attacker import (
 )
 from app.services.attacker.agent import AttackerAgentService
 from app.services.attacker.crawler import PlaywrightCrawler
-from app.services.attacker.scanner import EvidenceBasedScanner, SafeHttpClient
+from app.services.attacker.scanner import EvidenceBasedScanner, SafeHttpClient, deduplicate_findings
 from app.services.attacker.ssrf_guard import (
     normalize_target_url,
     TargetAuthorizationError,
@@ -279,13 +279,8 @@ class ScanJobManager:
                 logger.warning(f"Baseline socket checks failed: {str(e)}")
                 base_findings, base_meta = [], {}
 
-            # Step 3: Combine and deduplicate findings
-            all_findings: List[VulnerabilityFinding] = []
-            seen_ids = set()
-            for f in crawl_findings + base_findings:
-                if f.id not in seen_ids:
-                    seen_ids.add(f.id)
-                    all_findings.append(f)
+            # Step 3: Combine and deduplicate findings across crawl and socket probes
+            all_findings = deduplicate_findings(crawl_findings + base_findings)
 
             summary = agent_service._compute_summary(all_findings)
             summary.pages_discovered = crawl_summary["pages_discovered"]
@@ -298,6 +293,31 @@ class ScanJobManager:
             )
             defender_handover = agent_service._build_defender_handover(
                 all_findings, crawl_summary["normalized_url"], summary
+            )
+
+            # Evaluate Website Trust, Scam, Phishing, and Impersonation
+            from app.services.attacker.trust_engine import WebsiteTrustService
+            trust_service = WebsiteTrustService()
+
+            # Gather page title and forms from crawled pages for impersonation detection
+            page_title = None
+            all_forms: List[Dict[str, Any]] = []
+            for p in discovered_pages:
+                if not page_title and p.title:
+                    page_title = p.title
+                if p.forms:
+                    for f in p.forms:
+                        if hasattr(f, "model_dump"):
+                            all_forms.append(f.model_dump())
+                        elif isinstance(f, dict):
+                            all_forms.append(f)
+
+            trust_assessment = trust_service.evaluate_trust(
+                target_url=crawl_summary["normalized_url"],
+                current_scan_id=scan_id,
+                final_url=crawl_summary.get("final_url"),
+                page_title=page_title,
+                forms=all_forms,
             )
 
             # Persist completed scan record
@@ -320,6 +340,7 @@ class ScanJobManager:
                 "summary": summary.model_dump(),
                 "findings": [f.model_dump() for f in all_findings],
                 "inferred_attack_scenarios": [s.model_dump() for s in inferred_scenarios],
+                "trust_assessment": trust_assessment.model_dump(),
             })
 
             with self._lock:

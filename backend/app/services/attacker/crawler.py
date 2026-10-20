@@ -493,7 +493,7 @@ class PlaywrightCrawler:
         """
         Evaluates HTTP response headers on discovered pages using the existing security rules.
         Skips proxy/gateway failure pages (502, 503, 504) to avoid false positives.
-        Deduplicates across pages.
+        Deduplicates across pages while aggregating affected_urls and tracking occurrence count.
         """
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         lower_headers = {k.lower(): v for k, v in headers.items()}
@@ -502,119 +502,146 @@ class PlaywrightCrawler:
         if status_code in (502, 503, 504, 520, 521, 522, 524):
             return
 
+        def _record_finding(finding: VulnerabilityFinding):
+            if finding.id in seen_ids:
+                # Aggregate affected_url and increment occurrence_count on the existing record
+                for existing in findings:
+                    if existing.id == finding.id:
+                        existing.occurrence_count += 1
+                        if page_url not in existing.affected_urls:
+                            existing.affected_urls.append(page_url)
+                        break
+            else:
+                seen_ids.add(finding.id)
+                if page_url not in finding.affected_urls:
+                    finding.affected_urls.append(page_url)
+                findings.append(finding)
+
         # 1. Missing CSP
         csp = lower_headers.get("content-security-policy")
         if not csp:
             fid = "VULN-SEC-HDR-NO-CSP"
-            if fid not in seen_ids:
-                seen_ids.add(fid)
-                findings.append(
-                    VulnerabilityFinding(
-                        id=fid,
-                        title="Missing Content-Security-Policy (CSP) Header",
-                        category="Security Headers",
-                        severity="Medium",
-                        confidence="High",
-                        affected_url_or_component=page_url,
-                        evidence=FindingEvidence(
-                            check_type="security_headers",
-                            observed_data={"missing_header": "Content-Security-Policy"},
-                            raw_snippet="Response header 'Content-Security-Policy' is absent from HTTP response.",
-                            status_code=status_code,
-                            requested_url=page_url,
-                            final_url=page_url,
-                            observed_headers={},
-                            check_result="Potential risk",
-                            confidence_reason="Finding is based solely on absence of Content-Security-Policy header in observed page headers.",
-                            is_inferred=True,
-                            response_timestamp=now,
-                        ),
-                        potential_impact="Without CSP, the browser will execute any injected inline scripts or load external assets without restriction, amplifying XSS risks.",
-                        remediation="Configure a Content-Security-Policy header specifying authorized script-src, style-src, and default-src directives.",
-                        cwe_id="CWE-693",
-                        cve_id=None,
-                        scanner_name="CyberSentinal Crawler",
-                        scanned_at=now,
-                        references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"],
-                        is_confirmed=True,
-                        validation_status="Security Weakness",
-                    )
+            _record_finding(
+                VulnerabilityFinding(
+                    id=fid,
+                    title="Missing Content-Security-Policy (CSP) Header",
+                    category="Security Headers",
+                    severity="Medium",
+                    severity_reason="Absence of Content-Security-Policy header leaves client browser without origin-level script execution restrictions.",
+                    confidence="High",
+                    affected_url_or_component=page_url,
+                    affected_urls=[page_url],
+                    occurrence_count=1,
+                    evidence=FindingEvidence(
+                        check_type="security_headers",
+                        evidence_source="direct_observation",
+                        observed_value="absent",
+                        expected_condition="Content-Security-Policy header with restrictive default-src and script-src directives",
+                        observed_data={"missing_header": "Content-Security-Policy"},
+                        raw_snippet="Response header 'Content-Security-Policy' is absent from HTTP response.",
+                        status_code=status_code,
+                        requested_url=page_url,
+                        final_url=page_url,
+                        observed_headers={},
+                        check_result="Potential risk",
+                        confidence_reason="Finding is based on direct observation of absence of Content-Security-Policy header in observed page headers.",
+                        is_inferred=True,
+                        response_timestamp=now,
+                    ),
+                    potential_impact="Without CSP, the browser will execute any injected inline scripts or load external assets without restriction, amplifying XSS risks.",
+                    remediation="Configure a Content-Security-Policy header specifying authorized script-src, style-src, and default-src directives.",
+                    cwe_id="CWE-693",
+                    cve_id=None,
+                    scanner_name="CyberSentinal Crawler",
+                    scanned_at=now,
+                    references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"],
+                    is_confirmed=True,
+                    validation_status="Security Weakness",
                 )
+            )
 
         # 2. Missing X-Content-Type-Options: nosniff
         xcto = lower_headers.get("x-content-type-options", "").strip().lower()
         if "nosniff" not in xcto:
             fid = "VULN-SEC-HDR-NO-NOSNIFF"
-            if fid not in seen_ids:
-                seen_ids.add(fid)
-                findings.append(
-                    VulnerabilityFinding(
-                        id=fid,
-                        title="Missing X-Content-Type-Options: nosniff Header",
-                        category="Security Headers",
-                        severity="Low",
-                        confidence="High",
-                        affected_url_or_component=page_url,
-                        evidence=FindingEvidence(
-                            check_type="security_headers",
-                            observed_data={"header_value": xcto or "absent"},
-                            raw_snippet=f"X-Content-Type-Options is '{xcto or 'absent'}'.",
-                            status_code=status_code,
-                            requested_url=page_url,
-                            final_url=page_url,
-                            observed_headers={"x-content-type-options": xcto} if xcto else {},
-                            check_result="Confirmed observation" if xcto else "Potential risk",
-                            confidence_reason="Direct observation of header value missing mandatory 'nosniff' directive.",
-                            is_inferred=False if xcto else True,
-                            response_timestamp=now,
-                        ),
-                        potential_impact="Browsers may MIME-sniff response bodies away from the declared content-type, creating script execution vectors via user uploads.",
-                        remediation="Add 'X-Content-Type-Options: nosniff' header to all HTTP responses.",
-                        cwe_id="CWE-693",
-                        cve_id=None,
-                        scanner_name="CyberSentinal Crawler",
-                        scanned_at=now,
-                        references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options"],
-                        is_confirmed=True,
-                        validation_status="Security Weakness",
-                    )
+            _record_finding(
+                VulnerabilityFinding(
+                    id=fid,
+                    title="Missing X-Content-Type-Options: nosniff Header",
+                    category="Security Headers",
+                    severity="Low",
+                    severity_reason="X-Content-Type-Options header absent or invalid; browsers may MIME-sniff response content away from declared Content-Type.",
+                    confidence="High",
+                    affected_url_or_component=page_url,
+                    affected_urls=[page_url],
+                    occurrence_count=1,
+                    evidence=FindingEvidence(
+                        check_type="security_headers",
+                        evidence_source="direct_observation",
+                        observed_value=xcto or "absent",
+                        expected_condition="nosniff",
+                        observed_data={"header_value": xcto or "absent"},
+                        raw_snippet=f"X-Content-Type-Options is '{xcto or 'absent'}'.",
+                        status_code=status_code,
+                        requested_url=page_url,
+                        final_url=page_url,
+                        observed_headers={"x-content-type-options": xcto} if xcto else {},
+                        check_result="Confirmed observation" if xcto else "Potential risk",
+                        confidence_reason="Direct observation of header value missing mandatory 'nosniff' directive.",
+                        is_inferred=False if xcto else True,
+                        response_timestamp=now,
+                    ),
+                    potential_impact="Browsers may MIME-sniff response bodies away from the declared content-type, creating script execution vectors via user uploads.",
+                    remediation="Add 'X-Content-Type-Options: nosniff' header to all HTTP responses.",
+                    cwe_id="CWE-693",
+                    cve_id=None,
+                    scanner_name="CyberSentinal Crawler",
+                    scanned_at=now,
+                    references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options"],
+                    is_confirmed=True,
+                    validation_status="Security Weakness",
                 )
+            )
 
         # 3. Server Version Disclosure
         server_banner = lower_headers.get("server")
         if server_banner and any(char.isdigit() for char in server_banner):
             fid = "VULN-INFO-SERVER-VERSION"
-            if fid not in seen_ids:
-                seen_ids.add(fid)
-                findings.append(
-                    VulnerabilityFinding(
-                        id=fid,
-                        title=f"Web Server Version Disclosed: '{server_banner}'",
-                        category="Information Disclosure",
-                        severity="Low",
-                        confidence="High",
-                        affected_url_or_component=page_url,
-                        evidence=FindingEvidence(
-                            check_type="info_disclosure",
-                            observed_data={"server_banner": server_banner},
-                            raw_snippet=f"Server: {server_banner}",
-                            status_code=status_code,
-                            requested_url=page_url,
-                            final_url=page_url,
-                            observed_headers={"server": server_banner},
-                            check_result="Confirmed observation",
-                            confidence_reason="Direct empirical observation of Server header containing granular version string.",
-                            is_inferred=False,
-                            response_timestamp=now,
-                        ),
-                        potential_impact="Revealing granular software versions helps adversaries query vulnerability databases for targeted exploits.",
-                        remediation="Suppress version banners in web server configuration (e.g. server_tokens off in Nginx).",
-                        cwe_id="CWE-200",
-                        cve_id=None,
-                        scanner_name="CyberSentinal Crawler",
-                        scanned_at=now,
-                        references=["https://owasp.org/www-community/attacks/Fingerprinting"],
-                        is_confirmed=True,
-                        validation_status="Confirmed Observation",
-                    )
+            _record_finding(
+                VulnerabilityFinding(
+                    id=fid,
+                    title=f"Web Server Version Disclosed: '{server_banner}'",
+                    category="Information Disclosure",
+                    severity="Low",
+                    severity_reason="Disclosed software version permits targeted exploit searching against specific version release notes.",
+                    confidence="High",
+                    affected_url_or_component=page_url,
+                    affected_urls=[page_url],
+                    occurrence_count=1,
+                    evidence=FindingEvidence(
+                        check_type="info_disclosure",
+                        evidence_source="direct_observation",
+                        observed_value=server_banner,
+                        expected_condition="Server header without granular version numbers or omitted entirely",
+                        observed_data={"server_banner": server_banner},
+                        raw_snippet=f"Server: {server_banner}",
+                        status_code=status_code,
+                        requested_url=page_url,
+                        final_url=page_url,
+                        observed_headers={"server": server_banner},
+                        check_result="Confirmed observation",
+                        confidence_reason="Direct empirical observation of Server header containing granular version string.",
+                        is_inferred=False,
+                        response_timestamp=now,
+                    ),
+                    potential_impact="Revealing granular software versions helps adversaries query vulnerability databases for targeted exploits.",
+                    remediation="Suppress version banners in web server configuration (e.g. server_tokens off in Nginx).",
+                    cwe_id="CWE-200",
+                    cve_id=None,
+                    scanner_name="CyberSentinal Crawler",
+                    scanned_at=now,
+                    references=["https://owasp.org/www-community/attacks/Fingerprinting"],
+                    is_confirmed=True,
+                    validation_status="Confirmed Observation",
                 )
+            )

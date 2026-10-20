@@ -262,11 +262,13 @@ class DefenderPrioritizationEngine:
         val_status = finding.get("validation_status", "Confirmed Observation")
 
         # Inconclusive and proxy/connection error detection
+        raw_evidence = finding.get("evidence")
+        evidence_dict = raw_evidence if isinstance(raw_evidence, dict) else {}
         is_inconclusive = (
             finding_id in ("VULN-SCAN-GATEWAY-PROXY-ERROR", "VULN-SCAN-CONNECTION-FAILED")
             or val_status in ("Inconclusive", "Scan error")
             or "inconclusive" in title.lower()
-            or finding.get("evidence", {}).get("check_result") == "Inconclusive"
+            or evidence_dict.get("check_result") == "Inconclusive"
         )
 
         # Baseline severity weights
@@ -357,8 +359,24 @@ class DefenderPrioritizationEngine:
             f"3. Run automated verification probe via Defender Agent to confirm resolution on wire.",
         ]
 
-        # File / config location
-        file_loc = playbook.get("file_or_config_location") or "Web server configuration (Nginx / Apache) or reverse proxy middleware"
+        obs_cond = (
+            evidence_dict.get("observed_value")
+            or evidence_dict.get("raw_snippet")
+            or (raw_evidence if isinstance(raw_evidence, str) and raw_evidence.strip() else None)
+            or finding.get("severity_reason")
+            or "Direct wire observation from HTTP response"
+        )
+        exp_cond = (
+            evidence_dict.get("expected_condition")
+            or "Standard security control or RFC requirement active"
+        )
+
+        # Technology classification: specific if component is known, otherwise generic
+        comp_or_title = (title + " " + finding_id).lower()
+        if any(tech in comp_or_title for tech in ("nginx", "apache", "express", "next.js", "django", "php", "cve")):
+            tech_class = "technology_specific"
+        else:
+            tech_class = "generic"
 
         return RemediationRecommendation(
             finding_id=finding_id,
@@ -372,11 +390,14 @@ class DefenderPrioritizationEngine:
             short_explanation=finding.get("potential_impact") or playbook["root_cause"],
             why_it_matters=playbook.get("why_it_matters", playbook["root_cause"]),
             root_cause=playbook["root_cause"],
+            observed_condition=obs_cond,
+            expected_condition=exp_cond,
+            tech_classification=tech_class,
             actionable_fix=playbook["actionable_fix"],
             recommended_fix=playbook.get("actionable_fix", ""),
             implementation_steps=playbook["implementation_steps"],
             code_snippets=playbook.get("code_snippets", {}),
-            file_or_config_location=file_loc,
+            file_or_config_location=playbook.get("file_or_config_location", "Web server or application reverse proxy configuration"),
             implementation_difficulty=difficulty,
             estimated_effort_hours=effort_hours,
             hourly_rate=hourly_rate,

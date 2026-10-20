@@ -141,6 +141,12 @@ def init_db():
             except Exception:
                 pass  # already exists
 
+            # Add trust_assessment_json column if missing in scans table
+            try:
+                conn.execute("ALTER TABLE scans ADD COLUMN trust_assessment_json TEXT")
+            except Exception:
+                pass  # already exists
+
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id)"
             )
@@ -184,13 +190,14 @@ def save_scan_record(scan_data: Dict[str, Any]) -> None:
                 INSERT INTO scans (
                     scan_id, target_url, normalized_url, scanned_at, status,
                     target_ip, scope_limitations, scanner_info_json,
-                    summary_json, inferred_scenarios_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    summary_json, inferred_scenarios_json, trust_assessment_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     status=excluded.status,
                     target_ip=excluded.target_ip,
                     summary_json=excluded.summary_json,
                     inferred_scenarios_json=excluded.inferred_scenarios_json,
+                    trust_assessment_json=COALESCE(excluded.trust_assessment_json, scans.trust_assessment_json),
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -204,6 +211,7 @@ def save_scan_record(scan_data: Dict[str, Any]) -> None:
                     json.dumps(scan_data.get("scanner_info", {})),
                     json.dumps(scan_data.get("summary", {})),
                     json.dumps(scan_data.get("inferred_attack_scenarios", [])),
+                    json.dumps(scan_data.get("trust_assessment")) if scan_data.get("trust_assessment") is not None else None,
                     now,
                     now,
                 ),
@@ -336,6 +344,7 @@ def get_scan_record(scan_id: str) -> Optional[Dict[str, Any]]:
             "summary": json.loads(row["summary_json"] or "{}"),
             "findings": findings,
             "inferred_attack_scenarios": json.loads(row["inferred_scenarios_json"] or "[]"),
+            "trust_assessment": json.loads(row["trust_assessment_json"] or "null") if "trust_assessment_json" in row.keys() and row["trust_assessment_json"] else None,
         }
     finally:
         conn.close()
@@ -345,7 +354,7 @@ def list_recent_scans(limit: int = 10) -> List[Dict[str, Any]]:
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT scan_id, target_url, normalized_url, scanned_at, status, target_ip, summary_json, created_at FROM scans ORDER BY created_at DESC LIMIT ?",
+            "SELECT scan_id, target_url, normalized_url, scanned_at, status, target_ip, summary_json, trust_assessment_json, created_at FROM scans ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         results = []
@@ -358,6 +367,7 @@ def list_recent_scans(limit: int = 10) -> List[Dict[str, Any]]:
                 "status": r["status"],
                 "target_ip": r["target_ip"],
                 "summary": json.loads(r["summary_json"] or "{}"),
+                "trust_assessment": json.loads(r["trust_assessment_json"] or "null") if "trust_assessment_json" in r.keys() and r["trust_assessment_json"] else None,
                 "created_at": r["created_at"],
             })
         return results

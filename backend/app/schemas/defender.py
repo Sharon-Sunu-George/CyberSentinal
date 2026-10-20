@@ -22,6 +22,9 @@ class RemediationRecommendation(BaseModel):
     short_explanation: str = Field(default="", description="Short explanation of the security issue")
     why_it_matters: str = Field(default="", description="Why this security issue matters to perimeter security")
     root_cause: str = Field(..., description="Technical root cause explanation")
+    observed_condition: str = Field(default="", description="Empirical wire condition observed on the target")
+    expected_condition: str = Field(default="", description="Expected security baseline or standard condition")
+    tech_classification: str = Field(default="generic", description="'technology_specific' or 'generic'")
     actionable_fix: str = Field(..., description="Concrete, actionable fix description")
     recommended_fix: str = Field(default="", description="Recommended technical fix for engineers")
     implementation_steps: List[str] = Field(

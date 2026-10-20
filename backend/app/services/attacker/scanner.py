@@ -12,6 +12,7 @@ Performs conservative, non-destructive checks against authorized targets:
 """
 
 import datetime
+import hashlib
 import http.client
 import os
 import re
@@ -33,6 +34,42 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB limit to prevent resource exhaustion
 MAX_REDIRECT_HOPS = 2
 USER_AGENT = "CyberSentinal-Security-Auditor/2.0 (+https://cybersentinel.ai/scanner-policy)"
+
+
+def deduplicate_findings(findings: List[VulnerabilityFinding]) -> List[VulnerabilityFinding]:
+    """
+    Groups and deduplicates security findings representing the same underlying issue,
+    while preserving every affected URL, tracking occurrence count, and computing
+    a stable evidence-based fingerprint.
+    """
+    deduped: List[VulnerabilityFinding] = []
+    seen_map: Dict[str, VulnerabilityFinding] = {}
+
+    for f in findings:
+        # Build stable fingerprint based on check/finding identity and category
+        # If fingerprint is not already computed:
+        fp_key = f"{f.id}:{f.category}:{f.cwe_id or ''}:{f.evidence.check_type}"
+        fp_hash = hashlib.sha256(fp_key.encode("utf-8")).hexdigest()[:16]
+
+        if not f.fingerprint:
+            f.fingerprint = f"FP-{fp_hash}"
+
+        affected_url = f.evidence.final_url or f.evidence.requested_url or f.affected_url_or_component
+        if affected_url and affected_url not in f.affected_urls:
+            f.affected_urls.append(affected_url)
+
+        if f.id in seen_map:
+            existing = seen_map[f.id]
+            existing.occurrence_count += f.occurrence_count or 1
+            for u in f.affected_urls:
+                if u and u not in existing.affected_urls:
+                    existing.affected_urls.append(u)
+        else:
+            seen_map[f.id] = f
+            deduped.append(f)
+
+    return deduped
+
 
 
 def detect_proxy_or_tunnel_error(status_code: int, headers: Dict[str, str], body_text: str = "") -> Tuple[bool, Optional[str]]:
@@ -503,54 +540,109 @@ class EvidenceBasedScanner:
         # Check 10: Suspicious Redirects & Insecure Downgrades
         self._check_suspicious_redirects(main_resp, findings, now)
 
-        # Deduplicate findings by ID
-        unique_findings: List[VulnerabilityFinding] = []
-        seen_ids = set()
-        for f in findings:
-            if f.id not in seen_ids:
-                seen_ids.add(f.id)
-                unique_findings.append(f)
+        # Deduplicate findings preserving all affected URLs and tracking occurrence count
+        unique_findings = deduplicate_findings(findings)
 
         return unique_findings, scan_meta
 
     def _check_transport_security(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
         ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         if not resp.was_https:
-            findings.append(
-                VulnerabilityFinding(
-                    id="VULN-TLS-NO-HTTPS",
-                    title="Cleartext HTTP Scheme in Use",
-                    category="Transport Security",
-                    severity="High",
-                    confidence="High",
-                    affected_url_or_component=resp.url,
-                    evidence=FindingEvidence(
-                        check_type="tls_configuration",
-                        observed_data={"scheme": "http", "status": resp.status_code},
-                        raw_snippet=f"Target URL is served over unencrypted HTTP: {resp.url}",
-                        status_code=resp.status_code,
-                        requested_url=resp.requested_url,
-                        final_url=resp.final_url,
-                        observed_headers={},
-                        check_result="Confirmed observation",
-                        confidence_reason="Observed connection protocol is plain unencrypted HTTP. All network traffic is sent in cleartext.",
-                        is_inferred=False,
-                        response_timestamp=resp.response_timestamp,
-                    ),
-                    potential_impact="Network eavesdroppers and man-in-the-middle attackers can intercept or modify transmitted credentials, session cookies, and sensitive payloads.",
-                    remediation="Migrate site to HTTPS, redirect all HTTP port 80 traffic to HTTPS port 443, and configure HSTS.",
-                    cwe_id="CWE-319",
-                    cve_id=None,
-                    scanner_name=self.scanner_name,
-                    scanned_at=ts,
-                    references=[
-                        "https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure",
-                        "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html",
-                    ],
-                    is_confirmed=True,
-                    validation_status="Confirmed Observation",
+            # Check if this HTTP request immediately redirected to HTTPS
+            redirected_to_https = False
+            if resp.redirect_chain:
+                for hop in resp.redirect_chain:
+                    if hop.get("to_url", "").lower().startswith("https://"):
+                        redirected_to_https = True
+                        break
+            elif resp.final_url.lower().startswith("https://"):
+                redirected_to_https = True
+
+            if redirected_to_https:
+                findings.append(
+                    VulnerabilityFinding(
+                        id="VULN-TLS-HTTP-REDIRECT-HTTPS",
+                        title="HTTP Endpoint Redirects to HTTPS (Initial Hop Unencrypted)",
+                        category="Transport Security",
+                        severity="Low",
+                        severity_reason="Endpoint accepts HTTP but immediately redirects (301/308) to HTTPS. Initial request hop is cleartext, leaving a narrow window for local network interception.",
+                        confidence="High",
+                        affected_url_or_component=resp.url,
+                        evidence=FindingEvidence(
+                            check_type="tls_configuration",
+                            evidence_source="direct_observation",
+                            observed_value=f"HTTP {resp.status_code} redirecting to {resp.final_url}",
+                            expected_condition="HSTS preload or strict HTTPS transport requirement",
+                            observed_data={
+                                "initial_scheme": "http",
+                                "final_scheme": "https",
+                                "redirect_chain": resp.redirect_chain,
+                            },
+                            raw_snippet=f"Initial request to {resp.requested_url} redirected to {resp.final_url}",
+                            status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
+                            observed_headers={},
+                            check_result="Confirmed observation",
+                            confidence_reason="Empirically confirmed that HTTP endpoint immediately redirects to HTTPS. Transport risk is localized to the initial redirect hop.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
+                        ),
+                        potential_impact="Attackers with inline network access could intercept or hijack the initial unencrypted HTTP redirect request prior to HTTPS establishment.",
+                        remediation="Submit domain to HSTS preload list and ensure Strict-Transport-Security header is sent with includeSubDomains and preload.",
+                        cwe_id="CWE-319",
+                        cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html",
+                        ],
+                        is_confirmed=True,
+                        validation_status="Confirmed Observation",
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    VulnerabilityFinding(
+                        id="VULN-TLS-NO-HTTPS",
+                        title="Cleartext HTTP Scheme in Use",
+                        category="Transport Security",
+                        severity="High",
+                        severity_reason="Traffic served over unencrypted HTTP without automatic HTTPS redirection, exposing communications to passive eavesdropping.",
+                        confidence="High",
+                        affected_url_or_component=resp.url,
+                        evidence=FindingEvidence(
+                            check_type="tls_configuration",
+                            evidence_source="direct_observation",
+                            observed_value=f"scheme=http, status={resp.status_code}",
+                            expected_condition="HTTPS scheme (TLS 1.2+ encrypted transport)",
+                            observed_data={"scheme": "http", "status": resp.status_code},
+                            raw_snippet=f"Target URL is served over unencrypted HTTP without redirecting to HTTPS: {resp.url}",
+                            status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
+                            observed_headers={},
+                            check_result="Confirmed observation",
+                            confidence_reason="Observed connection protocol is plain unencrypted HTTP. All network traffic is sent in cleartext.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
+                        ),
+                        potential_impact="Network eavesdroppers and man-in-the-middle attackers can intercept or modify transmitted credentials, session cookies, and sensitive payloads.",
+                        remediation="Migrate site to HTTPS, redirect all HTTP port 80 traffic to HTTPS port 443, and configure HSTS.",
+                        cwe_id="CWE-319",
+                        cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure",
+                            "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html",
+                        ],
+                        is_confirmed=True,
+                        validation_status="Confirmed Observation",
+                    )
+                )
         else:
             # HSTS is evaluated ONLY on HTTPS connections per RFC 6797 Section 7.2
             hsts = resp.get_header("Strict-Transport-Security")
@@ -561,15 +653,20 @@ class EvidenceBasedScanner:
                         title="Missing HTTP Strict Transport Security (HSTS)",
                         category="Transport Security",
                         severity="Medium",
+                        severity_reason="Strict-Transport-Security header omitted over HTTPS; browsers remain susceptible to SSL-stripping downgrades on subsequent visits.",
                         confidence="High",
                         affected_url_or_component=resp.url,
                         evidence=FindingEvidence(
                             check_type="security_headers",
+                            evidence_source="direct_observation",
+                            observed_value="absent",
+                            expected_condition="Strict-Transport-Security: max-age=31536000; includeSubDomains",
                             observed_data={"missing_header": "Strict-Transport-Security", "scheme": "https"},
                             raw_snippet="Response headers do not include 'Strict-Transport-Security'.",
                             status_code=resp.status_code,
                             requested_url=resp.requested_url,
                             final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
                             observed_headers={k: v for k, v in resp.headers.items() if "transport" in k.lower() or "strict" in k.lower()},
                             check_result="Potential risk",
                             confidence_reason="Evaluated on a secure HTTPS response. Strict-Transport-Security header is completely absent, allowing SSL-stripping downgrades.",
@@ -601,18 +698,23 @@ class EvidenceBasedScanner:
                     title="Missing Content Security Policy (CSP)",
                     category="Security Headers",
                     severity="Medium",
+                    severity_reason="Absence of Content-Security-Policy header leaves client browser without origin-level script execution restrictions.",
                     confidence="High",
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="security_headers",
+                        evidence_source="direct_observation",
+                        observed_value="absent",
+                        expected_condition="Content-Security-Policy header with restrictive default-src and script-src directives",
                         observed_data={"missing_header": "Content-Security-Policy"},
                         raw_snippet="Response header 'Content-Security-Policy' is absent from the target HTTP response.",
                         status_code=resp.status_code,
                         requested_url=resp.requested_url,
                         final_url=resp.final_url,
+                        redirect_chain=resp.redirect_chain,
                         observed_headers={},
                         check_result="Potential risk",
-                        confidence_reason="Finding is based solely on the absence of the Content-Security-Policy header in observed headers. No direct script injection was tested.",
+                        confidence_reason="Finding is based on direct observation of the absence of the Content-Security-Policy header. No direct script injection was tested.",
                         is_inferred=True,
                         response_timestamp=resp.response_timestamp,
                     ),
@@ -630,6 +732,56 @@ class EvidenceBasedScanner:
                     validation_status="Security Weakness",
                 )
             )
+        else:
+            # Check for weak CSP directives: unsafe-inline or unsafe-eval in script-src / default-src
+            csp_lower = csp.lower()
+            weak_directives = []
+            if "'unsafe-inline'" in csp_lower or '"unsafe-inline"' in csp_lower:
+                weak_directives.append("'unsafe-inline'")
+            if "'unsafe-eval'" in csp_lower or '"unsafe-eval"' in csp_lower:
+                weak_directives.append("'unsafe-eval'")
+
+            if weak_directives:
+                findings.append(
+                    VulnerabilityFinding(
+                        id="VULN-SEC-HDR-WEAK-CSP",
+                        title=f"Weak Content Security Policy ({', '.join(weak_directives)})",
+                        category="Security Headers",
+                        severity="Low",
+                        severity_reason="Content-Security-Policy is present but includes unsafe-inline or unsafe-eval, reducing resistance to injected script execution.",
+                        confidence="High",
+                        affected_url_or_component=resp.url,
+                        evidence=FindingEvidence(
+                            check_type="security_headers",
+                            evidence_source="direct_observation",
+                            observed_value=f"Directives: {', '.join(weak_directives)} in CSP",
+                            expected_condition="CSP without 'unsafe-inline' or 'unsafe-eval' (using nonces, hashes, or strict-dynamic)",
+                            observed_data={"weak_directives": weak_directives, "csp_snippet": csp[:200]},
+                            raw_snippet=f"Content-Security-Policy contains weak directives: {', '.join(weak_directives)}",
+                            status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
+                            observed_headers={"content-security-policy": csp[:300]},
+                            check_result="Confirmed observation",
+                            confidence_reason="Direct empirical observation of unsafe-inline or unsafe-eval directives in active Content-Security-Policy header.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
+                        ),
+                        potential_impact="Injected inline scripts or eval() calls can execute despite the presence of CSP, diminishing protection against XSS vulnerabilities.",
+                        remediation="Refactor inline JavaScript into external bundles and replace 'unsafe-inline' with cryptographic script nonces or hashes.",
+                        cwe_id="CWE-693",
+                        cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP",
+                            "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
+                        ],
+                        is_confirmed=True,
+                        validation_status="Security Weakness",
+                    )
+                )
 
         xcto = resp.get_header("X-Content-Type-Options")
         if not xcto:
@@ -639,15 +791,20 @@ class EvidenceBasedScanner:
                     title="Missing X-Content-Type-Options Header",
                     category="Security Headers",
                     severity="Low",
+                    severity_reason="X-Content-Type-Options header absent; browsers may MIME-sniff response content away from declared Content-Type.",
                     confidence="High",
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="security_headers",
+                        evidence_source="direct_observation",
+                        observed_value="absent",
+                        expected_condition="X-Content-Type-Options: nosniff",
                         observed_data={"header_value": "absent"},
                         raw_snippet="Response header 'X-Content-Type-Options' is absent.",
                         status_code=resp.status_code,
                         requested_url=resp.requested_url,
                         final_url=resp.final_url,
+                        redirect_chain=resp.redirect_chain,
                         observed_headers={},
                         check_result="Potential risk",
                         confidence_reason="X-Content-Type-Options is missing entirely; browser may sniff MIME types away from declared Content-Type.",
@@ -674,15 +831,20 @@ class EvidenceBasedScanner:
                     title="Invalid X-Content-Type-Options Header Value",
                     category="Security Headers",
                     severity="Low",
+                    severity_reason=f"Header is present with invalid value '{xcto}'; browsers require exact 'nosniff' directive to disable MIME sniffing.",
                     confidence="High",
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="security_headers",
+                        evidence_source="direct_observation",
+                        observed_value=xcto,
+                        expected_condition="nosniff",
                         observed_data={"header_value": xcto},
                         raw_snippet=f"Observed X-Content-Type-Options: '{xcto}' (expected 'nosniff')",
                         status_code=resp.status_code,
                         requested_url=resp.requested_url,
                         final_url=resp.final_url,
+                        redirect_chain=resp.redirect_chain,
                         observed_headers={"x-content-type-options": xcto},
                         check_result="Confirmed observation",
                         confidence_reason=f"Header is present with value '{xcto}', which does not contain the mandatory 'nosniff' directive.",
@@ -723,10 +885,14 @@ class EvidenceBasedScanner:
                     title="Missing Clickjacking Protection (X-Frame-Options / CSP frame-ancestors)",
                     category="Security Headers",
                     severity="Medium",
+                    severity_reason="Neither X-Frame-Options nor CSP frame-ancestors is configured to prevent malicious iframe framing.",
                     confidence="High",
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="security_headers",
+                        evidence_source="direct_observation",
+                        observed_value=f"X-Frame-Options: {xfo or 'absent'}; frame-ancestors: absent",
+                        expected_condition="X-Frame-Options: DENY|SAMEORIGIN or CSP frame-ancestors 'self'",
                         observed_data={
                             "x_frame_options": xfo or "absent",
                             "has_effective_xfo": has_effective_xfo,
@@ -740,6 +906,7 @@ class EvidenceBasedScanner:
                         status_code=resp.status_code,
                         requested_url=resp.requested_url,
                         final_url=resp.final_url,
+                        redirect_chain=resp.redirect_chain,
                         observed_headers={
                             k: v for k, v in resp.headers.items()
                             if k.lower() in ("x-frame-options", "content-security-policy")
@@ -852,15 +1019,20 @@ class EvidenceBasedScanner:
                     title="Overly Permissive CORS Policy with Credentials Allowed",
                     category="Access Control",
                     severity="High",
+                    severity_reason="Combining wildcard Access-Control-Allow-Origin with Access-Control-Allow-Credentials: true permits third-party origins to execute authenticated cross-origin reads.",
                     confidence="High",
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="cors",
+                        evidence_source="direct_observation",
+                        observed_value=f"Access-Control-Allow-Origin: {acao}; Access-Control-Allow-Credentials: {acac}",
+                        expected_condition="Explicit whitelisted origin or credentials disabled",
                         observed_data={"Access-Control-Allow-Origin": acao, "Access-Control-Allow-Credentials": acac},
                         raw_snippet=f"Access-Control-Allow-Origin: {acao}; Access-Control-Allow-Credentials: {acac}",
                         status_code=resp.status_code,
                         requested_url=resp.requested_url,
                         final_url=resp.final_url,
+                        redirect_chain=resp.redirect_chain,
                         observed_headers={"access-control-allow-origin": acao, "access-control-allow-credentials": acac},
                         check_result="Confirmed observation",
                         confidence_reason="Direct empirical observation of wildcard origin configured with credentials flag enabled.",
@@ -887,18 +1059,23 @@ class EvidenceBasedScanner:
                     title="Wildcard Access-Control-Allow-Origin Header",
                     category="Access Control",
                     severity="Low",
+                    severity_reason="Wildcard Access-Control-Allow-Origin permits any external domain to read public response payloads.",
                     confidence="High",
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="cors",
+                        evidence_source="direct_observation",
+                        observed_value=f"Access-Control-Allow-Origin: {acao}",
+                        expected_condition="Restricted origin whitelist or omission of header for non-public APIs",
                         observed_data={"Access-Control-Allow-Origin": acao},
                         raw_snippet=f"Access-Control-Allow-Origin: {acao}",
                         status_code=resp.status_code,
                         requested_url=resp.requested_url,
                         final_url=resp.final_url,
+                        redirect_chain=resp.redirect_chain,
                         observed_headers={"access-control-allow-origin": acao},
                         check_result="Confirmed observation",
-                        confidence_reason="Direct observation of wildcard Access-Control-Allow-Origin header.",
+                        confidence_reason="Direct observation of wildcard Access-Control-Allow-Origin header without credentials flag.",
                         is_inferred=False,
                         response_timestamp=resp.response_timestamp,
                     ),
@@ -937,15 +1114,20 @@ class EvidenceBasedScanner:
                         title=f"Cookie '{cookie_name}' Missing Secure Flag",
                         category="Session Management",
                         severity="Medium",
+                        severity_reason=f"Cookie '{cookie_name}' is transmitted over HTTPS without the Secure flag, making it vulnerable to transmission over subsequent cleartext connections.",
                         confidence="High",
                         affected_url_or_component=f"Cookie: {cookie_name}",
                         evidence=FindingEvidence(
                             check_type="cookie_flags",
+                            evidence_source="direct_observation",
+                            observed_value=f"Set-Cookie: {cookie_str} (missing 'Secure')",
+                            expected_condition="; Secure flag on all HTTPS cookies",
                             observed_data={"cookie": cookie_name, "raw": cookie_str},
                             raw_snippet=f"Set-Cookie: {cookie_str}",
                             status_code=resp.status_code,
                             requested_url=resp.requested_url,
                             final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
                             observed_headers={"set-cookie": cookie_str},
                             check_result="Confirmed observation",
                             confidence_reason="Observed Set-Cookie response header issued over HTTPS without the Secure flag.",
@@ -974,15 +1156,20 @@ class EvidenceBasedScanner:
                         title=f"Cookie '{cookie_name}' Missing HttpOnly Flag",
                         category="Session Management",
                         severity="Low",
+                        severity_reason=f"Cookie '{cookie_name}' lacks HttpOnly directive, allowing JavaScript read access via document.cookie.",
                         confidence="High",
                         affected_url_or_component=f"Cookie: {cookie_name}",
                         evidence=FindingEvidence(
                             check_type="cookie_flags",
+                            evidence_source="direct_observation",
+                            observed_value=f"Set-Cookie: {cookie_str} (missing 'HttpOnly')",
+                            expected_condition="; HttpOnly attribute on all session/sensitive cookies",
                             observed_data={"cookie": cookie_name, "raw": cookie_str},
                             raw_snippet=f"Set-Cookie: {cookie_str}",
                             status_code=resp.status_code,
                             requested_url=resp.requested_url,
                             final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
                             observed_headers={"set-cookie": cookie_str},
                             check_result="Confirmed observation",
                             confidence_reason="Observed Set-Cookie response header does not contain the HttpOnly directive.",
@@ -1017,10 +1204,14 @@ class EvidenceBasedScanner:
                         title=f"Potential {matched_cve['title']} ({matched_cve['cve_id']}) - Requires Validation",
                         category="Outdated Software",
                         severity=matched_cve["severity"],
+                        severity_reason="Disclosed software version matches known CVE database entry; requires exploit verification because vendor backported patches may exist.",
                         confidence="Medium",
                         affected_url_or_component=f"Server Banner: {server_banner}",
                         evidence=FindingEvidence(
                             check_type="info_disclosure",
+                            evidence_source="inference",
+                            observed_value=server_banner,
+                            expected_condition="Generic banner or suppression of Server header",
                             observed_data={
                                 "disclosed_banner": server_banner,
                                 "matched_component": matched_cve["title"],
@@ -1030,6 +1221,7 @@ class EvidenceBasedScanner:
                             status_code=resp.status_code,
                             requested_url=resp.requested_url,
                             final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
                             observed_headers={"server": server_banner},
                             check_result="Potential risk",
                             confidence_reason="Inferred risk based on exact version banner match; vendor backported patches may be present without version changes.",
@@ -1059,15 +1251,20 @@ class EvidenceBasedScanner:
                         title=f"Web Server Version Disclosed: '{server_banner}'",
                         category="Information Disclosure",
                         severity="Low",
+                        severity_reason="Disclosed software version permits targeted exploit searching against specific version release notes.",
                         confidence="High",
                         affected_url_or_component=resp.url,
                         evidence=FindingEvidence(
                             check_type="info_disclosure",
+                            evidence_source="direct_observation",
+                            observed_value=server_banner,
+                            expected_condition="Server header without granular version numbers or omitted entirely",
                             observed_data={"server_banner": server_banner},
                             raw_snippet=f"Server: {server_banner}",
                             status_code=resp.status_code,
                             requested_url=resp.requested_url,
                             final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
                             observed_headers={"server": server_banner},
                             check_result="Confirmed observation",
                             confidence_reason="Direct empirical observation of Server header containing granular version string.",
@@ -1085,6 +1282,47 @@ class EvidenceBasedScanner:
                         ],
                         is_confirmed=True,
                         validation_status="Confirmed Observation",
+                    )
+                )
+            else:
+                # Server banner without version string (e.g., "nginx", "cloudflare", "Apache")
+                findings.append(
+                    VulnerabilityFinding(
+                        id="VULN-INFO-SERVER-BANNER",
+                        title=f"Web Server Product Family Disclosed: '{server_banner}'",
+                        category="Information Disclosure",
+                        severity="Info",
+                        severity_reason="Discloses web server software family without granular version numbers.",
+                        confidence="High",
+                        affected_url_or_component=resp.url,
+                        evidence=FindingEvidence(
+                            check_type="info_disclosure",
+                            evidence_source="direct_observation",
+                            observed_value=server_banner,
+                            expected_condition="Server header suppressed entirely",
+                            observed_data={"server_banner": server_banner},
+                            raw_snippet=f"Server: {server_banner}",
+                            status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            redirect_chain=resp.redirect_chain,
+                            observed_headers={"server": server_banner},
+                            check_result="Confirmed observation",
+                            confidence_reason="Direct empirical observation of Server header disclosing software family name without version digits.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
+                        ),
+                        potential_impact="Disclosing server product family assists reconnaissance and technology stack fingerprinting.",
+                        remediation="Suppress the Server header entirely in reverse proxy or web server configuration.",
+                        cwe_id="CWE-200",
+                        cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://owasp.org/www-community/attacks/Fingerprinting",
+                        ],
+                        is_confirmed=True,
+                        validation_status="Informational Observation",
                     )
                 )
 

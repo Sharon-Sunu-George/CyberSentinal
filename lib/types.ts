@@ -154,3 +154,8 @@ export type ViewId =
   | "settings"
   | "report-upload"
   | "agent-simulation"
+  | "dashboard"
+  | "new-assessment"
+  | "assessment-report"
+  | "remediation-center"
+  | "assessment-history"

@@ -1,16 +1,20 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   AlertCircle,
   ArrowRight,
   BrainCircuit,
   CheckCircle2,
   ExternalLink,
+  FileText,
   Flame,
   Gauge,
+  Globe,
   Server,
+  Shield,
   ShieldAlert,
+  ShieldCheck,
   Siren,
   Sparkles,
   TrendingDown,
@@ -26,11 +30,29 @@ import { DEFAULT_BUDGET, investmentOptions } from "@/lib/investments"
 import { optimizeBudget } from "@/lib/optimizer"
 import { formatINR } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { apiClient } from "@/lib/api-client"
 import { RiskTrend } from "./overview/risk-trend"
 
 export function OverviewView() {
   const { assessment: a, previousAssessment: p, dataset, navigate } = useAppState()
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null)
+  const [latestScan, setLatestScan] = useState<any>(null)
+
+  // Fetch latest real perimeter assessment summary
+  useEffect(() => {
+    let isMounted = true
+    apiClient
+      .getRecentScans(1)
+      .then((scans) => {
+        if (isMounted && scans && scans.length > 0) {
+          setLatestScan(scans[0])
+        }
+      })
+      .catch(() => {})
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   // 1. Highest Risk Asset (#1 rank)
   const topRisk = a.assetRisks[0]
@@ -49,6 +71,68 @@ export function OverviewView() {
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 pb-8">
+      {/* ─────────────────────────────────────────────────────────────
+          LATEST PERIMETER ASSESSMENT SUMMARY (IF PERSISTED SCANS EXIST)
+      ───────────────────────────────────────────────────────────── */}
+      {latestScan && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 text-xs">
+          <div className="flex items-center gap-3">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+              <Globe className="size-4" />
+            </span>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-foreground">Latest Perimeter Assessment:</span>
+                <span className="font-mono text-primary font-bold">{latestScan.target_url}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-mono font-bold ${latestScan.status === "completed" ? "bg-emerald-500/15 text-emerald-400" : "bg-muted text-muted-foreground"}`}>
+                  {latestScan.status}
+                </span>
+                {latestScan.trust_state && (
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-mono font-bold border ${
+                      latestScan.trust_state === "Known Malicious / Phishing"
+                        ? "bg-rose-500/20 text-rose-400 border-rose-500/40"
+                        : latestScan.trust_state === "Likely Impersonation"
+                        ? "bg-orange-500/20 text-orange-400 border-orange-500/40"
+                        : latestScan.trust_state === "Suspicious"
+                        ? "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                        : latestScan.trust_state === "No Known Threat Detected"
+                        ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                        : "bg-blue-500/20 text-blue-400 border-blue-500/40"
+                    }`}
+                  >
+                    Trust: {latestScan.trust_state}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                {latestScan.total_findings} technical finding{latestScan.total_findings === 1 ? "" : "s"} · Scanned {new Date(latestScan.start_time).toLocaleString()}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => navigate("assessment-report", undefined, latestScan.scan_id)}
+              className="h-8 gap-1.5 text-xs border-primary/40 hover:bg-primary/10"
+            >
+              <FileText className="size-3.5 text-primary" />
+              Open Scan Report
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => navigate("agent-simulation")}
+              className="h-8 gap-1.5 text-xs bg-primary text-primary-foreground font-semibold"
+            >
+              Launch Scanner
+              <ArrowRight className="size-3" />
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* ─────────────────────────────────────────────────────────────
           ROW 1: OVERALL RISK (1) + CRITICAL ISSUES (2)
       ───────────────────────────────────────────────────────────── */}

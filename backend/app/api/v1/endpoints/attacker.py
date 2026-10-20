@@ -316,5 +316,12 @@ def get_scanner_status() -> Dict[str, Any]:
             "Public Sensitive File Exposure (/.env, /.git/HEAD)",
             "Suspicious Redirects & Transport Downgrade",
             "Curated CVE Version Fingerprint Matching",
+            "Website Trust & Threat Intelligence (Google Safe Browsing, PhishTank)",
+            "Domain Lookalike, Typosquatting & Punycode Impersonation Detection",
+            "Canonical URL Deduplication & Verification",
         ],
+        "threat_intel_providers": {
+            "google_safe_browsing": bool(os.getenv("GOOGLE_SAFE_BROWSING_API_KEY")),
+            "phishtank": bool(os.getenv("PHISHTANK_API_KEY")),
+        },
     }

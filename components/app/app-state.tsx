@@ -51,13 +51,14 @@ interface State {
   isStale: boolean
   unread: number
   analystAssetId: string | null
+  selectedScanId: string | null
   lastSimulation: ActivityEvent | null
   autoRefreshEnabled: boolean
   nextAssessmentSeconds: number
 }
 
 type Action =
-  | { type: "navigate"; view: ViewId; analystAssetId?: string }
+  | { type: "navigate"; view: ViewId; analystAssetId?: string; scanId?: string }
   | { type: "assess-start" }
   | { type: "assess-complete"; at: string; backendResult?: BackendRiskAssessmentResponse }
   | { type: "simulate-tick"; at: string }
@@ -145,6 +146,7 @@ function initState(): State {
     isStale: false,
     unread: 2,
     analystAssetId: null,
+    selectedScanId: null,
     lastSimulation: null,
     autoRefreshEnabled: persisted.autoRefreshEnabled ?? true,
     nextAssessmentSeconds: DEFAULT_AUTO_REFRESH_INTERVAL_SEC,
@@ -164,7 +166,12 @@ function updateTrend(history: TrendPoint[], latestScore: number): TrendPoint[] {
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "navigate":
-      return { ...state, view: action.view, analystAssetId: action.analystAssetId ?? state.analystAssetId }
+      return {
+        ...state,
+        view: action.view,
+        analystAssetId: action.analystAssetId !== undefined ? action.analystAssetId : state.analystAssetId,
+        selectedScanId: action.scanId !== undefined ? action.scanId : state.selectedScanId,
+      }
 
     case "assess-start":
       return { ...state, isAssessing: true }
@@ -325,7 +332,7 @@ function reducer(state: State, action: Action): State {
 interface AppContextValue extends State {
   gaps: SecurityGap[]
   scenariosRemaining: number
-  navigate: (view: ViewId, analystAssetId?: string) => void
+  navigate: (view: ViewId, analystAssetId?: string, scanId?: string) => void
   runAssessment: () => void
   recordRiskAssessment: (backendResult: BackendRiskAssessmentResponse) => void
   simulateThreat: () => void
@@ -351,8 +358,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }, ASSESSMENT_DELAY_MS)
   }, [])
 
-  const navigate = useCallback((view: ViewId, analystAssetId?: string) => {
-    dispatch({ type: "navigate", view, analystAssetId })
+  const navigate = useCallback((view: ViewId, analystAssetId?: string, scanId?: string) => {
+    dispatch({ type: "navigate", view, analystAssetId, scanId })
     window.scrollTo({ top: 0 })
   }, [])
 

@@ -252,6 +252,21 @@ export const apiClient = {
     return res.json()
   },
 
+  async getRecentScans(limit: number = 10): Promise<Array<{
+    scan_id: string
+    target_url: string
+    normalized_url: string
+    scanned_at: string
+    status: string
+    target_ip?: string | null
+    summary: AttackerScanSummary
+    created_at: string
+  }>> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/recent?limit=${limit}`)
+    if (!res.ok) throw new Error(`Failed to load recent scans: HTTP ${res.status}`)
+    return res.json()
+  },
+
   async rescanTarget(scanId: string): Promise<AttackerScanResponse> {
     const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan/${scanId}/rescan`, {
       method: "POST",
@@ -394,11 +409,15 @@ export const apiClient = {
 
 export interface FindingEvidence {
   check_type: string
+  evidence_source?: string
+  observed_value?: string | null
+  expected_condition?: string | null
   observed_data: Record<string, any>
   raw_snippet?: string | null
   status_code?: number | null
   requested_url?: string | null
   final_url?: string | null
+  redirect_chain?: Array<{ from_url: string; to_url: string; status_code: number }>
   observed_headers?: Record<string, string>
   check_result?: string | null
   confidence_reason?: string | null
@@ -411,8 +430,12 @@ export interface VulnerabilityFinding {
   title: string
   category: string
   severity: "Critical" | "High" | "Medium" | "Low" | "Info"
+  severity_reason?: string | null
   confidence: "High" | "Medium" | "Low"
   affected_url_or_component: string
+  affected_urls?: string[]
+  occurrence_count?: number
+  fingerprint?: string | null
   evidence: FindingEvidence
   potential_impact: string
   remediation: string
@@ -492,6 +515,40 @@ export interface AttackerScanSummary {
   requests_completed?: number
 }
 
+export interface ThreatIntelligenceMatch {
+  provider: string
+  status: "match_detected" | "no_match" | "service_unavailable" | "unconfigured" | "lookup_failed"
+  threat_type?: string | null
+  details?: string | null
+  cached: boolean
+  lookup_timestamp: string
+  reference_url?: string | null
+}
+
+export interface ImpersonationSignal {
+  signal_type: "homoglyph" | "punycode" | "typosquatting" | "brand_name_in_subdomain" | "suspicious_redirect" | "copied_branding_with_credentials"
+  severity: "High" | "Medium" | "Low" | "Info"
+  target_brand?: string | null
+  official_domain?: string | null
+  description: string
+  evidence: Record<string, any>
+}
+
+export interface WebsiteTrustAssessment {
+  trust_state: "Known Malicious / Phishing" | "Likely Impersonation" | "Suspicious" | "No Known Threat Detected" | "Inconclusive"
+  trust_score_label: string
+  canonical_url: string
+  canonical_domain: string
+  is_duplicate_scan: boolean
+  duplicate_of_scan_id?: string | null
+  threat_intel_matches: ThreatIntelligenceMatch[]
+  impersonation_signals: ImpersonationSignal[]
+  reputation_providers_configured: boolean
+  confidence: "High" | "Medium" | "Low"
+  assessment_notes: string[]
+  assessed_at: string
+}
+
 export interface AttackerScanResponse {
   scan_id: string
   target_url: string
@@ -521,6 +578,7 @@ export interface AttackerScanResponse {
   discovered_pages?: DiscoveredPage[]
   inferred_attack_scenarios: InferredAttackScenario[]
   defender_handover: Record<string, any>
+  trust_assessment?: WebsiteTrustAssessment | null
 }
 
 export interface RemediationRecommendation {

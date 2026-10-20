@@ -14,6 +14,11 @@ import { ActivityView } from "@/components/views/activity-view"
 import { ReportUploadView } from "@/components/views/report-upload-view"
 import { AgentSimulationView } from "@/components/views/agent-simulation-view"
 import { SettingsView } from "@/components/views/settings-view"
+import { DashboardView } from "@/components/views/dashboard-view"
+import { NewAssessmentView } from "@/components/views/new-assessment-view"
+import { AssessmentReportView } from "@/components/views/assessment-report-view"
+import { RemediationCenterView } from "@/components/views/remediation-center-view"
+import { AssessmentHistoryView } from "@/components/views/assessment-history-view"
 
 function DashboardContent() {
   const { view } = useAppState()
@@ -35,13 +40,18 @@ function DashboardContent() {
     )
   }
 
-  // Existing dashboard layout: render with full sidebar and topbar
+  // Main application layout: render with full sidebar and topbar
   return (
     <div className="flex min-h-svh bg-background text-foreground">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />
         <main className="flex-1 p-4 lg:p-6">
+          {view === "dashboard" && <DashboardView />}
+          {view === "new-assessment" && <NewAssessmentView />}
+          {view === "assessment-report" && <AssessmentReportView />}
+          {view === "remediation-center" && <RemediationCenterView />}
+          {view === "assessment-history" && <AssessmentHistoryView />}
           {view === "overview" && <OverviewView />}
           {view === "explorer" && <ExplorerView />}
           {view === "analyst" && <AnalystView />}
