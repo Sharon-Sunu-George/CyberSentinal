@@ -1,0 +1,28 @@
+{
+  "report_id": "SCAN-PROD-2026",
+  "target": "prod-cluster.cyberquant.internal",
+  "findings": [
+    {
+      "id": "F-01",
+      "title": "Remote Code Execution in Ingress Controller",
+      "severity": "Critical",
+      "cvss_score": 9.8,
+      "cve": "CVE-2024-38856",
+      "recommendation": "Update ingress-nginx Helm chart"
+    },
+    {
+      "id": "F-02",
+      "title": "Unencrypted S3 Bucket with Customer Logs",
+      "severity": "High",
+      "cvss_score": 7.5,
+      "recommendation": "Enable AES-256 SSE encryption"
+    },
+    {
+      "id": "F-03",
+      "title": "Weak SSH Ciphers Permitted",
+      "severity": "Low",
+      "cvss_score": 3.1,
+      "recommendation": "Disable deprecated CBC ciphers"
+    }
+  ]
+}

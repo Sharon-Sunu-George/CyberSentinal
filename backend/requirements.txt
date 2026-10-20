@@ -2,3 +2,10 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 python-dotenv
+pypdf
+python-docx
+pillow
+pytesseract
+winocr
+python-multipart
+httpx

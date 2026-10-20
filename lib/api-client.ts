@@ -4,7 +4,7 @@
  */
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8010"
+  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
 
 export interface BackendRiskAssessmentRequest {
   scenario_name: string
@@ -119,6 +119,67 @@ export interface BackendDefenseSimulationResponse {
   recommended_next_action: string
 }
 
+export interface BackendReportSummary {
+  critical: number
+  high: number
+  medium: number
+  low: number
+  total_findings: number
+}
+
+export interface BackendReportFinding {
+  id: string
+  title: string
+  severity: "Critical" | "High" | "Medium" | "Low" | "Info"
+  cvss_score?: number | null
+  cve?: string | null
+  asset?: string | null
+  evidence?: string | Record<string, unknown> | null
+  recommendation?: string | null
+  is_inferred?: boolean
+  source?: string | null
+}
+
+export interface BackendNormalizedRiskScenario {
+  scenario_id: string
+  scenario_name: string
+  asset_name: string
+  asset_value?: number | null
+  threat_event_frequency?: number | null
+  vulnerability_probability?: number | null
+  direct_loss?: number | null
+  indirect_loss?: number | null
+  proposed_security_cost?: number | null
+  mitigated_vulnerability_probability?: number | null
+  is_inferred?: boolean
+  metrics?: BackendRiskMetrics | null
+  assumptions?: string[]
+  recommendation?: string | null
+}
+
+export interface BackendParsedReportResponse {
+  report_id: string
+  target: string
+  filename?: string | null
+  detected_format?: string | null
+  report_date?: string | null
+  environment?: string | null
+  report_type?: string | null
+  notice?: string | null
+  is_synthetic: boolean
+  summary: BackendReportSummary
+  findings: BackendReportFinding[]
+  scenarios?: BackendNormalizedRiskScenario[]
+  extracted_text_preview?: string | null
+  calculated_metrics?: BackendRiskMetrics | null
+  warnings?: string[]
+  missing_fields?: string[]
+  analysis_status?: string
+  ai_status?: string
+  ocr_status?: string
+}
+
+
 export const apiClient = {
   baseUrl: API_BASE_URL,
 
@@ -135,8 +196,36 @@ export const apiClient = {
       body: JSON.stringify(payload),
     })
     if (!res.ok) {
-      const errorText = await res.text().catch(() => "")
-      throw new Error(`Risk assessment failed: HTTP ${res.status} ${errorText}`)
+      let errorDetail = `HTTP ${res.status}`
+      try {
+        const errorJson = await res.json()
+        if (errorJson.detail) errorDetail = typeof errorJson.detail === "string" ? errorJson.detail : JSON.stringify(errorJson.detail)
+      } catch {
+        const text = await res.text().catch(() => "")
+        if (text) errorDetail = text
+      }
+      throw new Error(`Risk assessment failed: ${errorDetail}`)
+    }
+    return res.json()
+  },
+
+  async uploadReport(file: File): Promise<BackendParsedReportResponse> {
+    const formData = new FormData()
+    formData.append("file", file)
+    const res = await fetch(`${API_BASE_URL}/api/v1/reports/upload`, {
+      method: "POST",
+      body: formData,
+    })
+    if (!res.ok) {
+      let errorDetail = `HTTP ${res.status}`
+      try {
+        const errorJson = await res.json()
+        if (errorJson.detail) errorDetail = typeof errorJson.detail === "string" ? errorJson.detail : JSON.stringify(errorJson.detail)
+      } catch {
+        const text = await res.text().catch(() => "")
+        if (text) errorDetail = text
+      }
+      throw new Error(`Report upload failed: ${errorDetail}`)
     }
     return res.json()
   },
@@ -183,3 +272,4 @@ export const apiClient = {
     return res.json()
   },
 }
+

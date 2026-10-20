@@ -11,7 +11,7 @@ import { optimizeBudget } from "@/lib/optimizer"
 import { formatCurrency } from "@/lib/format"
 
 export function InvestmentsView() {
-  const { dataset } = useAppState()
+  const { dataset, currency } = useAppState()
   const [budgetInput, setBudgetInput] = useState<number>(DEFAULT_BUDGET)
 
   const result = useMemo(() => {
@@ -33,7 +33,7 @@ export function InvestmentsView() {
         <CardContent className="flex flex-col sm:flex-row items-center gap-4">
           <div className="flex-1 w-full">
             <label className="text-xs font-medium text-muted-foreground block mb-1.5">
-              Available Security Budget (USD)
+              Available Security Budget (USD Base · Displayed in {currency})
             </label>
             <Input
               type="number"
@@ -46,13 +46,13 @@ export function InvestmentsView() {
           </div>
           <div className="flex gap-2 pt-5 sm:pt-0">
             <Button variant="outline" size="sm" onClick={() => setBudgetInput(500000)}>
-              $500k
+              {formatCurrency(500000, currency)}
             </Button>
             <Button variant="outline" size="sm" onClick={() => setBudgetInput(1000000)}>
-              $1M
+              {formatCurrency(1000000, currency)}
             </Button>
             <Button variant="outline" size="sm" onClick={() => setBudgetInput(1500000)}>
-              $1.5M
+              {formatCurrency(1500000, currency)}
             </Button>
           </div>
         </CardContent>
@@ -63,7 +63,7 @@ export function InvestmentsView() {
           <CardHeader className="pb-2">
             <CardDescription>Proposed Total Spend</CardDescription>
             <CardTitle className="text-2xl font-bold font-mono">
-              {formatCurrency(result.proposed.totalCost)}
+              {formatCurrency(result.proposed.totalCost, currency)}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-xs text-muted-foreground">
@@ -121,7 +121,7 @@ export function InvestmentsView() {
                     <h4 className="font-semibold text-foreground text-sm">{option.name}</h4>
                   </div>
                   <div className="flex items-center gap-3 text-xs font-mono">
-                    <span className="text-muted-foreground">Cost: {formatCurrency(option.cost)}</span>
+                    <span className="text-muted-foreground">Cost: {formatCurrency(option.cost, currency)}</span>
                     <span className="bg-muted px-2 py-0.5 rounded text-foreground font-semibold">
                       Effort: {option.effort}
                     </span>
@@ -130,7 +130,7 @@ export function InvestmentsView() {
                 <p className="text-xs text-muted-foreground mb-3">{option.description}</p>
                 <div className="flex flex-wrap gap-4 text-xs font-mono pt-2 border-t text-muted-foreground">
                   <span>Standalone Impact: <strong className="text-foreground">-{standalonePct.toFixed(1)}% risk</strong></span>
-                  <span>Efficiency: <strong className="text-foreground">{efficiencyPerLakh.toFixed(1)} pts / $100k</strong></span>
+                  <span>Efficiency: <strong className="text-foreground">{efficiencyPerLakh.toFixed(1)} pts / {formatCurrency(100000, currency)}</strong></span>
                 </div>
               </div>
             ))}

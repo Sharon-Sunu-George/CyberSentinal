@@ -12,6 +12,7 @@ import { InvestmentsView } from "@/components/views/investments-view"
 import { GapsView } from "@/components/views/gaps-view"
 import { ActivityView } from "@/components/views/activity-view"
 import { ReportUploadView } from "@/components/views/report-upload-view"
+import { ReportAnalysisView } from "@/components/views/report-analysis-view"
 import { AgentSimulationView } from "@/components/views/agent-simulation-view"
 import { SettingsView } from "@/components/views/settings-view"
 
@@ -23,6 +24,7 @@ function DashboardContent() {
     view === "landing" ||
     view === "risk-assessment" ||
     view === "report-upload" ||
+    view === "report-analysis" ||
     view === "agent-simulation"
   ) {
     return (
@@ -30,12 +32,13 @@ function DashboardContent() {
         {view === "landing" && <LandingView />}
         {view === "risk-assessment" && <RiskAssessmentView />}
         {view === "report-upload" && <ReportUploadView />}
+        {view === "report-analysis" && <ReportAnalysisView />}
         {view === "agent-simulation" && <AgentSimulationView />}
       </main>
     )
   }
 
-  // Existing dashboard layout: render with full sidebar and topbar
+  // Dashboard layout: render with full sidebar and topbar
   return (
     <div className="flex min-h-svh bg-background text-foreground">
       <Sidebar />

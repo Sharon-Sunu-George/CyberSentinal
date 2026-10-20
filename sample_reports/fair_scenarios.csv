@@ -1,0 +1,3 @@
+scenario_name,asset_name,asset_value,threat_event_frequency,vulnerability_probability,direct_loss,indirect_loss,proposed_security_cost,mitigated_vulnerability_probability
+Ransomware on Primary DB,Customer DB,5000000,2.0,0.3,150000,350000,60000,0.08
+API Gateway Credential Stuffing,Payment API Gateway,2000000,4.0,0.15,50000,100000,20000,0.03

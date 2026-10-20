@@ -9,13 +9,20 @@ import { investigate, SAMPLE_QUESTION } from "@/lib/analyst"
 import { LevelBadge } from "@/components/app/badges"
 
 export function AnalystView() {
-  const { assessment, gaps, analystAssetId } = useAppState()
+  const { assessment, gaps, analystAssetId, activeReport } = useAppState()
   const [selectedAssetId, setSelectedAssetId] = useState<string>(
     analystAssetId || (assessment.assetRisks[0]?.asset.id ?? "")
   )
   const [question] = useState(SAMPLE_QUESTION)
 
-  const investigation = investigate(selectedAssetId, question, assessment, gaps)
+  const currentAssetId =
+    selectedAssetId && assessment.assetRisks.some((r) => r.asset.id === selectedAssetId)
+      ? selectedAssetId
+      : analystAssetId && assessment.assetRisks.some((r) => r.asset.id === analystAssetId)
+      ? analystAssetId
+      : (assessment.assetRisks[0]?.asset.id ?? "")
+
+  const investigation = investigate(currentAssetId, question, assessment, gaps)
 
   return (
     <div className="flex flex-col gap-6">
@@ -26,15 +33,15 @@ export function AnalystView() {
             <CardTitle>AI Risk Analyst (Deterministic Simulation)</CardTitle>
           </div>
           <CardDescription>
-            Rule-based evidence investigation engine for prioritised security assets.
+            Rule-based evidence investigation engine for prioritised security assets. Explanations are derived from deterministic multi-factor scoring and verified document findings.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col sm:flex-row items-center gap-4">
+        <CardContent className="flex flex-col gap-3">
           <div className="flex-1 w-full">
             <label className="text-xs font-medium text-muted-foreground block mb-1.5">
               Select Asset to Investigate
             </label>
-            <Select value={selectedAssetId} onValueChange={(val) => val && setSelectedAssetId(val)}>
+            <Select value={currentAssetId} onValueChange={(val) => val && setSelectedAssetId(val)}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select asset..." />
               </SelectTrigger>
@@ -47,6 +54,14 @@ export function AnalystView() {
               </SelectContent>
             </Select>
           </div>
+
+          {activeReport && (
+            <div className="flex items-center gap-2 rounded bg-card/80 border px-2.5 py-1 text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">Active Scan Source:</span>
+              <span className="font-mono text-primary font-medium">{activeReport.filename || activeReport.report_id}</span>
+              <span>· Target: {activeReport.target} ({activeReport.summary.total_findings} findings evaluated)</span>
+            </div>
+          )}
         </CardContent>
       </Card>
 

@@ -142,6 +142,8 @@ export interface ActivityEvent {
   overallChange?: { before: number; after: number }
 }
 
+export type CurrencyCode = "USD" | "INR" | "EUR" | "GBP"
+
 export type ViewId =
   | "landing"
   | "risk-assessment"
@@ -153,4 +155,5 @@ export type ViewId =
   | "activity"
   | "settings"
   | "report-upload"
+  | "report-analysis"
   | "agent-simulation"

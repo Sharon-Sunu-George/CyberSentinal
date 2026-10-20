@@ -1,0 +1,57 @@
+{
+  "report_id": "CQ-TEST-001",
+  "report_date": "2026-10-13",
+  "target": "demo.example.invalid",
+  "environment": "test-only",
+  "report_type": "synthetic_security_scan",
+  "notice": "All findings in this file are fictional test data for parser validation. This is not a real scan and must not be used as evidence of actual vulnerabilities.",
+  "summary": {
+    "critical": 1,
+    "high": 1,
+    "medium": 1,
+    "low": 1,
+    "total_findings": 4
+  },
+  "findings": [
+    {
+      "id": "TEST-001",
+      "title": "Unsupported Software Version",
+      "severity": "Critical",
+      "cvss_score": 9.1,
+      "cve": "CVE-2099-0001",
+      "asset": "Example Web Service",
+      "evidence": "Synthetic banner: ExampleServer/0.0-test",
+      "recommendation": "Verify the installed version against official vendor advisories and apply the appropriate update."
+    },
+    {
+      "id": "TEST-002",
+      "title": "Missing Content-Security-Policy Header",
+      "severity": "High",
+      "cvss_score": 7.2,
+      "cve": null,
+      "asset": "Example Web Service",
+      "evidence": "Synthetic sample indicates that the response lacks a Content-Security-Policy header.",
+      "recommendation": "Define and test an appropriate Content-Security-Policy."
+    },
+    {
+      "id": "TEST-003",
+      "title": "Cookie Missing Secure Attribute",
+      "severity": "Medium",
+      "cvss_score": 5.4,
+      "cve": null,
+      "asset": "Example Web Service",
+      "evidence": "Synthetic example: Set-Cookie: sessionid=REDACTED; HttpOnly; SameSite=Lax",
+      "recommendation": "Set the Secure attribute on sensitive cookies and verify HTTPS-only handling."
+    },
+    {
+      "id": "TEST-004",
+      "title": "Security Contact Unavailable",
+      "severity": "Low",
+      "cvss_score": null,
+      "cve": null,
+      "asset": "demo.example.invalid",
+      "evidence": "Synthetic sample indicates that /.well-known/security.txt was not found.",
+      "recommendation": "Consider publishing a valid security.txt file with a monitored security contact."
+    }
+  ]
+}

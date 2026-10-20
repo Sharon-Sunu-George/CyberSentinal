@@ -1,0 +1,43 @@
+{
+  "title": "CyberQuant Scan Feature Test Data",
+  "description": "Synthetic security-risk scenarios for testing file upload and parsing. Not real risk estimates.",
+  "currency": "USD",
+  "scenarios": [
+    {
+      "scenario_name": "Ransomware attack on customer database",
+      "asset_name": "Customer PII Database",
+      "asset_value": 5000000,
+      "threat_event_frequency": 2,
+      "vulnerability_probability": 0.35,
+      "direct_loss": 150000,
+      "indirect_loss": 300000,
+      "proposed_security_cost": 50000,
+      "mitigated_vulnerability_probability": 0.1,
+      "notes": "Synthetic test scenario; all values are illustrative."
+    },
+    {
+      "scenario_name": "Phishing attack on employee accounts",
+      "asset_name": "Employee Accounts",
+      "asset_value": 1000000,
+      "threat_event_frequency": 4,
+      "vulnerability_probability": 0.2,
+      "direct_loss": 30000,
+      "indirect_loss": 20000,
+      "proposed_security_cost": 10000,
+      "mitigated_vulnerability_probability": 0.05,
+      "notes": "Synthetic test scenario; all values are illustrative."
+    },
+    {
+      "scenario_name": "Cloud storage misconfiguration",
+      "asset_name": "Cloud Document Storage",
+      "asset_value": 2500000,
+      "threat_event_frequency": 1.5,
+      "vulnerability_probability": 0.25,
+      "direct_loss": 80000,
+      "indirect_loss": 120000,
+      "proposed_security_cost": 20000,
+      "mitigated_vulnerability_probability": 0.08,
+      "notes": "Synthetic test scenario; all values are illustrative."
+    }
+  ]
+}

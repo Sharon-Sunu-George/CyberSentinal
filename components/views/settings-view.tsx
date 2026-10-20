@@ -6,6 +6,7 @@ import {
   Bot,
   CheckCircle2,
   Clock,
+  DollarSign,
   Info,
   Loader2,
   Play,
@@ -17,6 +18,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useAppState } from "@/components/app/app-state"
+import { CURRENCY_CONFIGS, RATES_LAST_UPDATED } from "@/lib/format"
+import type { CurrencyCode } from "@/lib/types"
 
 interface AIStatus {
   provider_name: string
@@ -38,6 +41,8 @@ export function SettingsView() {
     toggleAutoRefresh,
     runAssessment,
     dataset,
+    currency,
+    setCurrency,
   } = useAppState()
 
   const [confirmResetOpen, setConfirmResetOpen] = useState(false)
@@ -151,21 +156,73 @@ export function SettingsView() {
             </div>
           </div>
 
-          {/* Section 2: Auto-refresh & Assessment Engine */}
+          {/* Section: Display Currency Preference */}
+          <div className="rounded-lg border bg-card p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="font-semibold text-sm flex items-center gap-2 text-foreground">
+                <DollarSign className="size-4 text-primary" /> Display Currency Preference
+              </h4>
+              <span className="font-mono text-xs text-muted-foreground">
+                Active: <strong className="text-primary font-bold">{currency} ({CURRENCY_CONFIGS[currency]?.symbol})</strong>
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Select your organization&apos;s reporting currency. Financial loss exposure (SLE, ALE), risk reduction, and investment budget recommendations convert dynamically for display while preserving the native FAIR model calculation base.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1">
+              {(Object.keys(CURRENCY_CONFIGS) as CurrencyCode[]).map((code) => {
+                const cfg = CURRENCY_CONFIGS[code]
+                const isSelected = currency === code
+                return (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => setCurrency(code)}
+                    className={`flex flex-col items-start justify-between rounded-lg border p-3 text-left transition-all ${
+                      isSelected
+                        ? "border-primary bg-primary/10 shadow-sm ring-1 ring-primary/40"
+                        : "border-border/80 bg-muted/20 hover:border-border hover:bg-muted/40"
+                    }`}
+                  >
+                    <div className="flex w-full items-center justify-between">
+                      <span className="font-mono text-base font-bold text-foreground">
+                        {cfg.symbol} {cfg.code}
+                      </span>
+                      {isSelected && <CheckCircle2 className="size-4 text-primary" />}
+                    </div>
+                    <span className="text-xs font-medium text-foreground mt-1">{cfg.name}</span>
+                    <span className="text-[10px] text-muted-foreground mt-0.5 font-mono">
+                      {cfg.rateFromUSD === 1.0 ? "Base (1.00)" : `1 USD = ${cfg.symbol}${cfg.rateFromUSD.toFixed(2)}`}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="flex items-start gap-2 rounded-md bg-muted/30 p-2.5 text-xs text-muted-foreground mt-2">
+              <Info className="size-4 text-primary shrink-0 mt-0.5" />
+              <p className="leading-relaxed">
+                Benchmark source: <strong className="text-foreground">{RATES_LAST_UPDATED}</strong>. Changing the display currency affects monetary presentation only; percentage reductions, risk scores, and underlying calculations remain constant.
+              </p>
+            </div>
+          </div>
+
+          {/* Section 2: Telemetry Simulation Feed & Background Signals */}
           <div className="rounded-lg border bg-card p-4 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h4 className="font-semibold text-sm flex items-center gap-2 text-foreground">
-                  <Clock className="size-4 text-primary" /> Continuous Risk Assessment & Scheduler
+                  <Clock className="size-4 text-primary" /> Simulated Telemetry Feed & Background Signals
                 </h4>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Synchronizes perimeter signals and recalculates risk telemetry periodically.
+                  Controls periodic baseline telemetry simulations and threat signals on the demo estate. Does not trigger live security scans.
                 </p>
               </div>
 
               <div className="flex items-center gap-2">
                 <span className="text-xs font-mono text-muted-foreground">
-                  {autoRefreshEnabled ? `Next cycle in ${nextAssessmentSeconds}s` : "Scheduler Paused"}
+                  {autoRefreshEnabled ? "Simulation Feed: Active" : "Simulation Feed: Paused"}
                 </span>
                 <Button
                   variant={autoRefreshEnabled ? "outline" : "default"}
@@ -173,7 +230,7 @@ export function SettingsView() {
                   onClick={toggleAutoRefresh}
                   className="text-xs"
                 >
-                  {autoRefreshEnabled ? "Pause Scheduler" : "Enable Scheduler"}
+                  {autoRefreshEnabled ? "Pause Simulation Feed" : "Resume Simulation Feed"}
                 </Button>
               </div>
             </div>

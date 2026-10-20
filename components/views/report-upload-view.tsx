@@ -3,49 +3,56 @@
 import { useState } from "react"
 import {
   AlertCircle,
-  ArrowLeft,
-  ArrowRight,
+  BrainCircuit,
+  FileCode,
+  FileSpreadsheet,
   FileText,
+  Home,
+  ImageIcon,
   Loader2,
-  Settings,
+  RotateCcw,
+  Shield,
   Upload,
   UploadCloud,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useAppState } from "@/components/app/app-state"
+import { apiClient } from "@/lib/api-client"
 
 export function ReportUploadView() {
-  const { navigate } = useAppState()
+  const { navigate, importScannerReport } = useAppState()
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [progressPercent, setProgressPercent] = useState(20)
+  const [statusMessage, setStatusMessage] = useState("Connecting to FastAPI backend...")
   const [error, setError] = useState<string | null>(null)
-  const [analyzed, setAnalyzed] = useState(false)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null
     setError(null)
-    setAnalyzed(false)
-    if (file) {
-      const validTypes = [
-        "application/pdf",
-        "application/json",
-        "text/csv",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "text/plain",
-      ]
-      const validExtensions = [".pdf", ".json", ".csv", ".xlsx", ".txt"]
-      const hasValidExt = validExtensions.some((ext) => file.name.toLowerCase().endsWith(ext))
 
-      if (!validTypes.includes(file.type) && !hasValidExt) {
-        setError("Invalid file format. Please upload a PDF, JSON, CSV, XLSX, or TXT security report.")
+    if (file) {
+      const validExtensions = [".json", ".csv", ".txt", ".docx", ".pdf", ".png", ".jpg", ".jpeg"]
+      const fileNameLower = file.name.toLowerCase()
+      const hasValidExt = validExtensions.some((ext) => fileNameLower.endsWith(ext))
+
+      if (!hasValidExt) {
+        setError(
+          "Invalid file format. Supported formats: Structured CSV, JSON, TXT, Word (.docx), PDF (text/scanned), and Images (.png, .jpg, .jpeg)."
+        )
         setSelectedFile(null)
         return
       }
 
-      // Check max size 25MB
       if (file.size > 25 * 1024 * 1024) {
-        setError("File is too large. Maximum file size is 25MB.")
+        setError("File size exceeds allowable limit of 25MB.")
+        setSelectedFile(null)
+        return
+      }
+
+      if (file.size === 0) {
+        setError("Uploaded file is empty (0 bytes).")
         setSelectedFile(null)
         return
       }
@@ -54,80 +61,171 @@ export function ReportUploadView() {
     }
   }
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     if (!selectedFile) {
-      setError("Please select a security report file before submitting.")
+      setError("Please select a document or report before submitting.")
       return
     }
     setError(null)
     setIsAnalyzing(true)
+    setProgressPercent(25)
+    setStatusMessage("Uploading document to FastAPI ingestion endpoint (port 8000)...")
 
-    setTimeout(() => {
+    try {
+      // Send document to FastAPI /api/v1/reports/upload endpoint
+      const result = await apiClient.uploadReport(selectedFile)
+      setProgressPercent(80)
+      setStatusMessage("Extracting findings & evaluating deterministic FAIR metrics...")
+      
+      // Ingest the parsed findings into the global app state and calculate risk
+      importScannerReport(result)
+      setProgressPercent(100)
+      
+      // Navigate directly to the Executive Overview dashboard with latest report data
+      navigate("overview")
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(`Processing failed: ${msg}. Please verify document formatting and ensure FastAPI is reachable on port 8000.`)
       setIsAnalyzing(false)
-      setAnalyzed(true)
-    }, 1200)
+    }
+  }
+
+  const handleReset = () => {
+    setSelectedFile(null)
+    setError(null)
   }
 
   return (
-    <div className="flex min-h-svh w-full flex-col items-center justify-start p-4 md:p-8">
-      <div className="w-full max-w-4xl space-y-6">
-        {/* Top bar with Back button and Settings shortcut */}
-        <div className="flex items-center justify-between border-b pb-4">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => navigate("landing")}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="size-4" />
-            Back to Home
-          </Button>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-foreground">CyberSentinel AI</span>
-            <span className="text-xs text-muted-foreground">· Security Report Analysis</span>
-          </div>
-
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => navigate("settings")}
-            className="text-xs text-muted-foreground hover:text-foreground"
-            title="Settings"
-          >
-            <Settings className="size-4" />
-          </Button>
-        </div>
-
-        {/* Header */}
-        <div>
-          <div className="flex items-center gap-2 text-primary font-semibold text-lg">
+    <div className="flex flex-col max-w-4xl mx-auto pt-10 md:pt-14 px-4 pb-16">
+      {/* Top Header with Back to Home in Top Right Corner */}
+      <div className="flex items-start justify-between gap-4 border-b pb-5">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-primary font-semibold text-lg md:text-xl">
             <UploadCloud className="size-5" />
-            <span>Security Report Upload & Analysis</span>
+            <span>Security Scanner & Document Ingestion</span>
           </div>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Upload automated vulnerability scan results, penetration test summaries, or compliance audit reports to extract findings.
+          <p className="text-xs text-muted-foreground max-w-xl leading-relaxed">
+            Upload vulnerability scan results, penetration testing documents, or compliance audits to ingest live findings directly into the Executive Overview dashboard.
           </p>
         </div>
 
-        {/* Upload Card */}
-        <Card className="border-primary/20 bg-card">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-semibold">Select or Drop Document</CardTitle>
-            <CardDescription className="text-xs">
-              Supported formats: PDF, JSON, CSV, XLSX, TXT (Maximum 25MB).
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+        <div className="shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              if (typeof window !== "undefined") {
+                window.location.href = "/"
+              }
+            }}
+            className="text-xs gap-1.5 shadow-sm"
+          >
+            <Home className="size-3.5 text-primary" />
+            Back to Home
+          </Button>
+        </div>
+      </div>
+
+      {/* Main Content pushed down slightly */}
+      <div className="mt-7 flex flex-col gap-6">
+
+      {/* Supported Formats Banner */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+        <div className="flex items-center gap-1.5 rounded-md border bg-card p-2">
+          <FileSpreadsheet className="size-3.5 text-emerald-500 shrink-0" />
+          <div className="truncate">
+            <span className="font-semibold block text-[11px]">CSV & JSON</span>
+            <span className="text-[10px] text-muted-foreground">FAIR & Vulnerability tables</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 rounded-md border bg-card p-2">
+          <FileText className="size-3.5 text-blue-500 shrink-0" />
+          <div className="truncate">
+            <span className="font-semibold block text-[11px]">TXT & DOCX</span>
+            <span className="text-[10px] text-muted-foreground">Word docs & Pentest notes</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 rounded-md border bg-card p-2">
+          <FileCode className="size-3.5 text-purple-500 shrink-0" />
+          <div className="truncate">
+            <span className="font-semibold block text-[11px]">PDF Reports</span>
+            <span className="text-[10px] text-muted-foreground">Vector & Scanned PDFs</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 rounded-md border bg-card p-2">
+          <ImageIcon className="size-3.5 text-amber-500 shrink-0" />
+          <div className="truncate">
+            <span className="font-semibold block text-[11px]">PNG / JPG</span>
+            <span className="text-[10px] text-muted-foreground">Windows / Tesseract OCR</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Upload Drop Zone Card - Primary Focus */}
+      <Card className="border-primary/20 bg-card">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold">
+            {isAnalyzing ? "Ingesting & Quantifying Document" : "Select or Drop Document"}
+          </CardTitle>
+          <CardDescription className="text-xs">
+            {isAnalyzing
+              ? "Running deterministic FAIR quantification engine on extracted findings."
+              : "Supported formats: JSON, CSV, TXT, Word (.docx), PDF, PNG, JPG/JPEG (Up to 25MB). Uploads are safely treated as untrusted data without execution."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isAnalyzing ? (
+            /* Calculating Active State - Quantifying Financial Cyber Risk */
+            <div className="flex flex-col items-center justify-center py-10 px-4 space-y-5 max-w-md mx-auto text-center">
+              <div className="relative mx-auto w-fit">
+                <div className="size-16 rounded-full border-4 border-primary/20 border-t-primary animate-spin" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <BrainCircuit className="size-6 text-primary animate-pulse" />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <h3 className="text-sm font-semibold text-foreground">
+                  Quantifying Financial Cyber Risk
+                </h3>
+                <p className="text-xs text-muted-foreground font-mono">
+                  {statusMessage}
+                </p>
+              </div>
+
+              {/* Real progress track */}
+              <div className="space-y-1.5 w-full">
+                <div className="h-2 w-full bg-secondary rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary transition-all duration-300 ease-out"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[11px] text-muted-foreground font-mono">
+                  <span>FAIR Engine (FastAPI 8000)</span>
+                  <span>{progressPercent}%</span>
+                </div>
+              </div>
+
+              <div className="rounded-lg bg-card border p-3 text-left space-y-1 text-[11px] text-muted-foreground w-full">
+                <div className="flex items-center gap-1.5 text-foreground font-medium">
+                  <Shield className="size-3.5 text-primary" />
+                  <span>Deterministic Calculations in Progress:</span>
+                </div>
+                <p>• Single Loss Expectancy (SLE) = Direct Loss + Indirect Loss</p>
+                <p>• Loss Event Frequency (LEF) = Threat Frequency × Vulnerability Probability</p>
+                <p>• Annual Loss Expectancy (ALE) = LEF × SLE</p>
+                <p>• Net Security ROI = (Risk Reduction - Investment Cost) / Investment Cost</p>
+              </div>
+            </div>
+          ) : (
             <div className="rounded-lg border-2 border-dashed border-border bg-card/50 p-8 text-center transition-colors hover:border-primary/50">
               <input
                 type="file"
                 id="report-upload-input"
                 className="hidden"
                 onChange={handleFileChange}
-                accept=".pdf,.json,.csv,.xlsx,.txt"
+                accept=".pdf,.json,.csv,.xlsx,.txt,.docx,.png,.jpg,.jpeg"
               />
               <label
                 htmlFor="report-upload-input"
@@ -138,14 +236,15 @@ export function ReportUploadView() {
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm font-medium text-foreground">
-                    Click to select a security report or drag & drop
+                    Click to select a document or drag & drop
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Nessus, Qualys, Burp Suite, SOC 2, or raw scan exports
+                    Accepts structured scan exports, audit documents, or camera/screenshot images
                   </p>
                 </div>
               </label>
 
+              {/* Selected File Details & Upload Action */}
               {selectedFile && (
                 <div className="mt-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-md border bg-muted/40 px-4 py-3 text-left">
                   <div className="flex items-center gap-3">
@@ -159,85 +258,50 @@ export function ReportUploadView() {
                       </p>
                     </div>
                   </div>
-                  <Button
-                    size="sm"
-                    onClick={handleAnalyze}
-                    disabled={isAnalyzing}
-                    className="shrink-0"
-                  >
-                    {isAnalyzing ? (
-                      <>
-                        <Loader2 className="mr-2 size-3.5 animate-spin" />
-                        Analyzing Report…
-                      </>
-                    ) : (
-                      "Analyze Report"
-                    )}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={handleReset}
+                      disabled={isAnalyzing}
+                      className="text-xs text-muted-foreground"
+                    >
+                      <RotateCcw className="size-3.5 mr-1" />
+                      Clear
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleAnalyze}
+                      disabled={isAnalyzing}
+                      className="shrink-0"
+                    >
+                      Upload & Scan Document
+                    </Button>
+                  </div>
                 </div>
               )}
 
               {error && (
-                <div className="mt-4 flex items-center gap-2 text-xs text-destructive text-left rounded-md bg-destructive/10 p-2.5 border border-destructive/20">
-                  <AlertCircle className="size-4 shrink-0" />
-                  <span>{error}</span>
+                <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-destructive text-left rounded-md bg-destructive/10 p-3 border border-destructive/20">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="size-4 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleAnalyze}
+                    disabled={!selectedFile || isAnalyzing}
+                    className="h-7 text-xs border-destructive/30 hover:bg-destructive/20 self-start sm:self-auto"
+                  >
+                    Retry Upload
+                  </Button>
                 </div>
               )}
             </div>
-          </CardContent>
-        </Card>
-
-        {/* Processed state banner with transition to Dashboard */}
-        {analyzed && (
-          <Card className="border-warning/30 bg-warning/5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2 text-warning">
-                <AlertCircle className="size-5" />
-                <CardTitle className="text-base">Document Ingestion Notice</CardTitle>
-              </div>
-              <CardDescription className="text-foreground font-medium">
-                Document parsed: <span className="font-mono text-xs">{selectedFile?.name}</span>
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3 text-xs leading-relaxed text-muted-foreground">
-              <p>
-                Security report parsing pipeline has cataloged the document findings. You can now explore the overall risk posture and itemized vulnerabilities directly in the dashboard.
-              </p>
-              <div className="pt-2 flex flex-wrap gap-3">
-                <Button size="sm" onClick={() => navigate("overview")}>
-                  Proceed to Executive Overview
-                  <ArrowRight className="size-3.5 ml-1.5" />
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => navigate("explorer")}>
-                  View Asset & Vulnerability Explorer
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Accepted schemas footer */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold">Accepted Report Standards</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-              <div className="rounded-md border p-2.5 bg-muted/20">
-                <span className="font-medium text-foreground block mb-0.5 text-[11px]">Vulnerability Scanners</span>
-                <p className="text-muted-foreground text-[10px]">Nessus XML/JSON, Qualys Guard, OpenVAS</p>
-              </div>
-              <div className="rounded-md border p-2.5 bg-muted/20">
-                <span className="font-medium text-foreground block mb-0.5 text-[11px]">Audit Frameworks</span>
-                <p className="text-muted-foreground text-[10px]">SOC 2, ISO 27001, CIS Benchmarks</p>
-              </div>
-              <div className="rounded-md border p-2.5 bg-muted/20">
-                <span className="font-medium text-foreground block mb-0.5 text-[11px]">Cloud Posture</span>
-                <p className="text-muted-foreground text-[10px]">AWS Security Hub, Defender, Prisma Cloud</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+          )}
+        </CardContent>
+      </Card>
       </div>
     </div>
   )
