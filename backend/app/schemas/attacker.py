@@ -134,6 +134,10 @@ class AttackerScanRequest(BaseModel):
         le=300,
         description="Configurable total scan timeout in seconds (default: 90s)"
     )
+    target_class: Optional[str] = Field(
+        default="public",
+        description="Target class: 'public' (external internet), 'local_dev' (local development), or 'private_network' (internal private CIDR)"
+    )
 
 
 
@@ -143,6 +147,7 @@ class AttackerScanResponse(BaseModel):
     normalized_url: str
     scanned_at: str
     status: str = Field(default="completed", description="'queued', 'running', 'completed', 'failed', or 'cancelled'")
+    target_class: str = Field(default="public", description="Target classification: 'public', 'local_dev', or 'private_network'")
     target_ip: Optional[str] = None
     scanner_info: Dict[str, Any] = Field(
         default_factory=dict,

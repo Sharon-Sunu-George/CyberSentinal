@@ -53,6 +53,88 @@ def get_local_dev_target_config() -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_internal_network_config() -> Optional[Dict[str, Any]]:
+    """
+    Retrieves administrative configuration for private/internal network assessments.
+    Deny by default: requires ALLOW_INTERNAL_NETWORK_SCAN=true AND CYBERSENTINEL_ENV in ('development', 'test', 'local', 'admin', 'controlled').
+    Requires explicit CIDR allowlist in INTERNAL_NETWORK_ALLOWLIST (e.g. '10.0.0.0/8,192.168.1.0/24').
+    Cloud metadata (169.254.0.0/16, metadata.google.internal, instance-data) is NEVER permitted.
+    """
+    allow_flag = os.getenv("ALLOW_INTERNAL_NETWORK_SCAN", "").strip().lower()
+    env_name = os.getenv("CYBERSENTINEL_ENV", os.getenv("ENVIRONMENT", "production")).strip().lower()
+
+    if allow_flag not in ("true", "1", "yes") or env_name not in ("development", "test", "local", "admin", "controlled"):
+        return None
+
+    raw_allowlist = os.getenv("INTERNAL_NETWORK_ALLOWLIST", "").strip()
+    if not raw_allowlist:
+        return None
+
+    allowed_cidrs: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    metadata_net = ipaddress.ip_network("169.254.0.0/16")
+    for item in raw_allowlist.split(","):
+        cidr_str = item.strip()
+        if not cidr_str:
+            continue
+        try:
+            net = ipaddress.ip_network(cidr_str, strict=False)
+            # Metadata addresses are non-negotiably blocked under all conditions
+            if net.overlaps(metadata_net):
+                continue
+            allowed_cidrs.append(net)
+        except ValueError:
+            continue
+
+    if not allowed_cidrs:
+        return None
+
+    return {
+        "allowed_networks": allowed_cidrs,
+        "is_enabled": True,
+    }
+
+
+def classify_target(raw_url: str) -> str:
+    """
+    Identifies the target category for an input URL:
+    - 'local_dev': matches explicitly authorized local development test target
+    - 'private_network': resolves to or references RFC1918 private / internal address space
+    - 'public': standard external internet web destination
+    """
+    clean_url = raw_url.strip()
+    if not clean_url:
+        return "public"
+
+    try:
+        parsed = urllib.parse.urlsplit(clean_url if "://" in clean_url else f"https://{clean_url}")
+        hostname = (parsed.hostname or "").lower().strip(".")
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+
+        local_cfg = get_local_dev_target_config()
+        if local_cfg and hostname == local_cfg["host"] and port == local_cfg["port"]:
+            return "local_dev"
+
+        if hostname in ("localhost", "127.0.0.1", "::1") or hostname.endswith(".localhost"):
+            return "local_dev"
+
+        for suffix in BLOCKED_HOSTNAME_SUFFIXES:
+            if hostname.endswith(suffix):
+                return "private_network"
+
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            if ip_obj.is_loopback:
+                return "local_dev"
+            if ip_obj.is_private or ip_obj.is_link_local:
+                return "private_network"
+        except ValueError:
+            pass
+
+        return "public"
+    except Exception:
+        return "public"
+
+
 # Disallowed domain suffixes and reserved names
 BLOCKED_HOSTNAMES = {
     "localhost",
@@ -175,7 +257,22 @@ def normalize_target_url(raw_url: str) -> Tuple[str, str, int, str]:
             if parsed.scheme.lower() == cfg_scheme:
                 is_authorized_local_test_target = True
 
-    if not is_authorized_local_test_target:
+    # Check whether an administrative private/internal network config is active and matches
+    internal_cfg = get_internal_network_config()
+    is_authorized_internal_target = False
+    if internal_cfg is not None:
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            # Never allow metadata (169.254.0.0/16) or loopback in internal network CIDRs
+            if not ip_obj.is_loopback and not ip_obj.is_link_local and not (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                for allowed_net in internal_cfg["allowed_networks"]:
+                    if ip_obj in allowed_net:
+                        is_authorized_internal_target = True
+                        break
+        except ValueError:
+            pass
+
+    if not is_authorized_local_test_target and not is_authorized_internal_target:
         # Check blocked hostnames and suffixes
         if hostname in BLOCKED_HOSTNAMES:
             raise SSRFProtectionError(
@@ -186,7 +283,8 @@ def normalize_target_url(raw_url: str) -> Tuple[str, str, int, str]:
         for suffix in BLOCKED_HOSTNAME_SUFFIXES:
             if hostname.endswith(suffix):
                 raise SSRFProtectionError(
-                    f"Target host '{hostname}' belongs to prohibited internal domain suffix '{suffix}'."
+                    f"Target host '{hostname}' belongs to prohibited internal domain suffix '{suffix}'. "
+                    "Private/internal network targets require administrative authorization (ALLOW_INTERNAL_NETWORK_SCAN=true)."
                 )
 
         # If hostname is an IP literal, validate immediately
@@ -195,10 +293,20 @@ def normalize_target_url(raw_url: str) -> Tuple[str, str, int, str]:
         except ValueError:
             ip_obj = None
 
-        if ip_obj is not None and is_ip_forbidden(ip_obj):
-            raise SSRFProtectionError(
-                f"Target host '{hostname}' is in a prohibited private, loopback, or metadata IP range."
-            )
+        if ip_obj is not None:
+            if is_ip_forbidden(ip_obj):
+                if ip_obj in ipaddress.ip_network("169.254.0.0/16") or ip_obj.is_link_local:
+                    raise SSRFProtectionError(
+                        f"Target host '{hostname}' is in a prohibited private, link-local, or cloud metadata IP range."
+                    )
+                if ip_obj.is_private:
+                    raise SSRFProtectionError(
+                        f"Target host '{hostname}' is in a prohibited private network IP range. "
+                        "Private network scanning is denied by default and requires administrative configuration (ALLOW_INTERNAL_NETWORK_SCAN=true with INTERNAL_NETWORK_ALLOWLIST)."
+                    )
+                raise SSRFProtectionError(
+                    f"Target host '{hostname}' is in a prohibited private, loopback, or metadata IP range."
+                )
 
     path_with_query = parsed.path or "/"
     if parsed.query:
@@ -236,8 +344,9 @@ def resolve_and_verify_ip(
 
     If opt-in local dev mode is active and the target strictly matches LOCAL_DEV_TARGET,
     resolutions to loopback (127.0.0.1 or ::1) for that specific target host and port are accepted.
-    Any resolution to other private networks (10.x, 192.168.x, 172.16.x) or cloud metadata (169.254.x)
-    is strictly rejected.
+    If administrative internal network mode is active with an authorized CIDR allowlist,
+    resolutions within the allowlist are accepted.
+    Any resolution to cloud metadata (169.254.x) is strictly rejected under all modes.
     """
     local_dev_cfg = get_local_dev_target_config()
     is_authorized_local_test_target = False
@@ -245,12 +354,19 @@ def resolve_and_verify_ip(
         if hostname.lower().strip(".") == local_dev_cfg["host"] and port == local_dev_cfg["port"]:
             is_authorized_local_test_target = True
 
+    internal_cfg = get_internal_network_config()
+
     # 1. If hostname is directly an IP literal
     try:
         ip_obj = ipaddress.ip_address(hostname)
         if is_authorized_local_test_target and ip_obj.is_loopback:
             family = socket.AF_INET6 if isinstance(ip_obj, ipaddress.IPv6Address) else socket.AF_INET
             return str(ip_obj), family
+
+        if internal_cfg is not None and any(ip_obj in net for net in internal_cfg["allowed_networks"]):
+            if not ip_obj.is_link_local and not (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                family = socket.AF_INET6 if isinstance(ip_obj, ipaddress.IPv6Address) else socket.AF_INET
+                return str(ip_obj), family
 
         if is_ip_forbidden(ip_obj):
             raise SSRFProtectionError(f"Destination IP '{hostname}' is in a prohibited private or reserved range.")
@@ -308,6 +424,9 @@ def resolve_and_verify_ip(
                 raise SSRFProtectionError(
                     f"Local dev scan target '{hostname}' resolved to non-loopback prohibited address '{ip_str}'."
                 )
+        elif internal_cfg is not None and any(ip_obj in net for net in internal_cfg["allowed_networks"]):
+            if ip_obj.is_link_local or (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                raise SSRFProtectionError(f"Target '{hostname}' resolved to prohibited cloud metadata IP '{ip_str}'.")
         else:
             if is_ip_forbidden(ip_obj):
                 raise SSRFProtectionError(
@@ -346,6 +465,17 @@ def validate_destination_url(url: str) -> Tuple[bool, str]:
         if local_dev_cfg is not None:
             if hostname == local_dev_cfg["host"] and port == local_dev_cfg["port"]:
                 return True, "Authorized local dev target"
+
+        # Check administrative internal network configuration
+        internal_cfg = get_internal_network_config()
+        if internal_cfg is not None:
+            try:
+                ip_obj = ipaddress.ip_address(hostname)
+                if any(ip_obj in net for net in internal_cfg["allowed_networks"]):
+                    if not ip_obj.is_link_local and not (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                        return True, "Authorized internal network target"
+            except ValueError:
+                pass
 
         # Check standard allowed ports for public targets
         if port not in (80, 443, 8080, 8443):

@@ -498,6 +498,7 @@ export interface AttackerScanResponse {
   normalized_url: string
   scanned_at: string
   status: string
+  target_class?: string
   target_ip?: string | null
   scanner_info: {
     engine?: string

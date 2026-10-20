@@ -629,6 +629,18 @@ class TestDefenderVerificationHardening(unittest.TestCase):
                     "remediation_status": "Fixed Pending Verification",
                     "evidence": {},
                 },
+                {
+                    "id": "VULN-EXPOSED-ENV-FILE",
+                    "title": "Exposed .env Configuration File",
+                    "category": "Information Disclosure",
+                    "severity": "Critical",
+                    "confidence": "High",
+                    "affected_url_or_component": f"{self.target_url}/.env",
+                    "potential_impact": "Credential compromise",
+                    "remediation": "Remove .env from web root",
+                    "remediation_status": "Fixed Pending Verification",
+                    "evidence": {},
+                },
             ],
             "is_inconclusive": False,
         })
@@ -840,4 +852,56 @@ class TestDefenderVerificationHardening(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             verify_remediation(self.scan_id, "NON-EXISTENT-FINDING")
         self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_11_exposed_env_file_verification(self):
+        """11. Verify that .env exposure fix passes when 404/403 returned, and fails if 200 plaintext."""
+        with patch("app.api.v1.endpoints.defender.SafeHttpClient.request") as mock_req, \
+             patch("app.api.v1.endpoints.defender.normalize_target_url") as mock_norm:
+            mock_norm.return_value = (f"{self.target_url}/.env", "harden-target.example.com", 443, "/.env")
+
+            # Case A: Still returns HTTP 200 with plaintext .env content -> Reopened / Not Fixed
+            mock_req.return_value = SafeHttpResponse(
+                url=f"{self.target_url}/.env",
+                status_code=200,
+                headers={"Content-Type": "text/plain"},
+                body_text="DB_PASSWORD=secret123\nPORT=3000\n",
+                remote_ip="93.184.216.34",
+                was_https=True,
+            )
+            resp_still_exposed = verify_remediation(self.scan_id, "VULN-EXPOSED-ENV-FILE")
+            self.assertTrue(resp_still_exposed.is_verified)
+            self.assertFalse(resp_still_exposed.verification_passed)
+            self.assertEqual(resp_still_exposed.new_status, "Reopened")
+
+            # Case B: Returns HTTP 404 -> Verified Fixed
+            mock_req.return_value = SafeHttpResponse(
+                url=f"{self.target_url}/.env",
+                status_code=404,
+                headers={},
+                body_text="Not Found",
+                remote_ip="93.184.216.34",
+                was_https=True,
+            )
+            resp_fixed_404 = verify_remediation(self.scan_id, "VULN-EXPOSED-ENV-FILE")
+            self.assertTrue(resp_fixed_404.is_verified)
+            self.assertTrue(resp_fixed_404.verification_passed)
+            self.assertEqual(resp_fixed_404.new_status, "Verified Fixed")
+
+            # Case C: Returns HTTP 403 Forbidden -> Verified Fixed
+            mock_req.return_value = SafeHttpResponse(
+                url=f"{self.target_url}/.env",
+                status_code=403,
+                headers={},
+                body_text="Access Denied",
+                remote_ip="93.184.216.34",
+                was_https=True,
+            )
+            resp_fixed_403 = verify_remediation(self.scan_id, "VULN-EXPOSED-ENV-FILE")
+            self.assertTrue(resp_fixed_403.is_verified)
+            self.assertTrue(resp_fixed_403.verification_passed)
+            self.assertEqual(resp_fixed_403.new_status, "Verified Fixed")
+
+
+if __name__ == "__main__":
+    unittest.main()
 

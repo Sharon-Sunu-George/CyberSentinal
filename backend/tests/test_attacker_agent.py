@@ -928,5 +928,173 @@ class TestAdversarialSecuritySuite(unittest.TestCase):
                 self.assertIn("Forbidden port", reason)
 
 
+class TestTargetClassesAndEvidenceChecks(unittest.TestCase):
+    """Verifies target classes (public, local_dev, private_network) and evidence detection quality."""
+
+    def test_classify_public_target(self):
+        from app.services.attacker.ssrf_guard import classify_target
+        self.assertEqual(classify_target("https://example.com/"), "public")
+        self.assertEqual(classify_target("http://93.184.216.34/"), "public")
+
+    def test_classify_local_dev_target(self):
+        from app.services.attacker.ssrf_guard import classify_target
+        with patch.dict(os.environ, {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }):
+            self.assertEqual(classify_target("http://localhost:4000"), "local_dev")
+            self.assertEqual(classify_target("http://127.0.0.1:8000"), "local_dev")
+
+    def test_classify_private_network_target(self):
+        from app.services.attacker.ssrf_guard import classify_target
+        self.assertEqual(classify_target("http://192.168.1.50/"), "private_network")
+        self.assertEqual(classify_target("http://10.0.1.100/"), "private_network")
+        self.assertEqual(classify_target("http://service.internal/"), "private_network")
+
+    def test_private_network_denied_by_default(self):
+        """Private networks are denied by default without explicit admin config."""
+        from app.services.attacker.ssrf_guard import normalize_target_url, SSRFProtectionError
+        with patch.dict(os.environ, {"ALLOW_INTERNAL_NETWORK_SCAN": "", "INTERNAL_NETWORK_ALLOWLIST": ""}):
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                normalize_target_url("http://192.168.1.10/")
+            self.assertIn("private network", str(ctx.exception).lower())
+
+    def test_private_network_permitted_with_admin_allowlist(self):
+        """Private networks permitted when explicit administrative allowlist is configured."""
+        from app.services.attacker.ssrf_guard import normalize_target_url, resolve_and_verify_ip
+        with patch.dict(os.environ, {
+            "ALLOW_INTERNAL_NETWORK_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "INTERNAL_NETWORK_ALLOWLIST": "10.0.0.0/8,192.168.1.0/24",
+        }):
+            norm_url, host, port, path = normalize_target_url("http://10.0.5.20:8080/dashboard")
+            self.assertEqual(norm_url, "http://10.0.5.20:8080/dashboard")
+            self.assertEqual(host, "10.0.5.20")
+            self.assertEqual(port, 8080)
+
+            # Resolved IP check
+            ip_str, family = resolve_and_verify_ip("10.0.5.20", 8080)
+            self.assertEqual(ip_str, "10.0.5.20")
+
+    def test_cloud_metadata_denied_under_all_configurations(self):
+        """169.254.169.254 must be blocked even if internal network scanning is allowed."""
+        from app.services.attacker.ssrf_guard import normalize_target_url, SSRFProtectionError
+        with patch.dict(os.environ, {
+            "ALLOW_INTERNAL_NETWORK_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "INTERNAL_NETWORK_ALLOWLIST": "169.254.0.0/16,10.0.0.0/8",
+        }):
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                normalize_target_url("http://169.254.169.254/latest/meta-data/")
+            self.assertIn("prohibited", str(ctx.exception).lower())
+
+    def test_sensitive_env_file_detected_with_credentials_redacted(self):
+        """Checks that exposed .env files are detected and all passwords/secrets are redacted."""
+        scanner = EvidenceBasedScanner()
+        mock_client = MagicMock()
+        scanner.client = mock_client
+
+        raw_env_content = (
+            "APP_ENV=production\n"
+            "PORT=3000\n"
+            "DB_USER=postgres\n"
+            "DB_PASSWORD=SuperSecretProductionPassword999!\n"
+            "API_KEY=AIzaSyA_REAL_SECRET_TOKEN_XYZ123456\n"
+            "JWT_SECRET=ultra_confidential_signing_key_abc\n"
+        )
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.env",
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            body_text=raw_env_content,
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_sensitive_files("example.com", 443, True, findings)
+
+        self.assertEqual(len(findings), 1)
+        env_finding = findings[0]
+        self.assertEqual(env_finding.id, "VULN-EXPOSED-ENV-FILE")
+        self.assertEqual(env_finding.severity, "Critical")
+        self.assertEqual(env_finding.confidence, "High")
+
+        # Crucial check: secrets MUST BE REDACTED and never preserved in raw snippet or evidence
+        self.assertNotIn("SuperSecretProductionPassword999!", env_finding.evidence.raw_snippet)
+        self.assertNotIn("AIzaSyA_REAL_SECRET_TOKEN_XYZ123456", env_finding.evidence.raw_snippet)
+        self.assertNotIn("ultra_confidential_signing_key_abc", env_finding.evidence.raw_snippet)
+        self.assertIn("[REDACTED_SECRET]", env_finding.evidence.raw_snippet)
+
+    def test_sensitive_env_file_custom_404_html_rejected(self):
+        """A custom 404 HTML error page on /.env must not produce a false positive."""
+        scanner = EvidenceBasedScanner()
+        mock_client = MagicMock()
+        scanner.client = mock_client
+
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.env",
+            status_code=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body_text="<!DOCTYPE html><html><head><title>Page Not Found</title></head><body><h1>404 Not Found</h1></body></html>",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_sensitive_files("example.com", 443, True, findings)
+        self.assertEqual(len(findings), 0)
+
+    def test_sensitive_git_head_detected(self):
+        """A genuine .git/HEAD file returns confirmed finding."""
+        scanner = EvidenceBasedScanner()
+        mock_client = MagicMock()
+        scanner.client = mock_client
+
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.git/HEAD",
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            body_text="ref: refs/heads/main\n",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_sensitive_files("example.com", 443, True, findings)
+        self.assertEqual(len(findings), 1)
+        git_finding = findings[0]
+        self.assertEqual(git_finding.id, "VULN-EXPOSED-GIT-HEAD")
+        self.assertEqual(git_finding.severity, "High")
+
+    def test_redirect_downgrade_detected(self):
+        """Insecure HTTPS to HTTP redirection hop is flagged as VULN-REDIRECT-HTTPS-DOWNGRADE."""
+        scanner = EvidenceBasedScanner()
+        resp = SafeHttpResponse(
+            url="http://example.com/login",
+            status_code=200,
+            headers={},
+            body_text="Welcome",
+            remote_ip="93.184.216.34",
+            was_https=False,
+            requested_url="https://example.com/",
+            redirect_chain=[
+                {
+                    "from_url": "https://example.com/",
+                    "to_url": "http://example.com/login",
+                    "status_code": 302,
+                }
+            ],
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_suspicious_redirects(resp, findings)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].id, "VULN-REDIRECT-HTTPS-DOWNGRADE")
+        self.assertEqual(findings[0].severity, "High")
+
+
 if __name__ == "__main__":
     unittest.main()
+

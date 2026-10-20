@@ -418,6 +418,103 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         "rollback_guidance": "Remove the /.well-known/security.txt file from the web root or remove the Nginx location block.",
         "verification_procedure": "curl -s https://<TARGET_HOST>/.well-known/security.txt | grep -i contact",
     },
+    "VULN-EXPOSED-ENV-FILE": {
+        "root_cause": "The web server serves the .env configuration file publicly from the document root without access restriction.",
+        "why_it_matters": "Exposing .env files reveals database passwords, private encryption keys, cloud credentials, and API tokens to unauthorized external actors, leading to immediate complete compromise.",
+        "actionable_fix": "Move .env outside public document root, block dotfiles in reverse proxy/web server, and immediately rotate all credentials found in the file.",
+        "implementation_steps": [
+            "1. Move .env file to a directory above the public web root (e.g. /var/www/app/ rather than /var/www/app/public/).",
+            "2. Add server configuration rules to deny access to hidden dotfiles (location ~ /\\. { deny all; }).",
+            "3. Add .env and *.env to .gitignore to prevent accidental repository commits.",
+            "4. CRITICAL: Immediately rotate all database passwords, API keys, and cryptographic secrets declared in the exposed file.",
+        ],
+        "code_snippets": {
+            "Nginx": (
+                "location ~ /\\. {\n"
+                "    deny all;\n"
+                "    access_log off;\n"
+                "    log_not_found off;\n"
+                "    return 404;\n"
+                "}"
+            ),
+            "Apache": (
+                "<FilesMatch \"^\\.\">\n"
+                "    Require all denied\n"
+                "</FilesMatch>"
+            ),
+            "Generic / Shell": "# Move .env out of document root\nmv /path/to/public/.env /path/to/app-config/.env\nchmod 600 /path/to/app-config/.env",
+        },
+        "effort_hours": 3.0,
+        "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration (nginx.conf / .htaccess) and application deployment directory",
+        "dependencies": ["Root/admin access to web server", "Permission to rotate upstream API keys and DB credentials"],
+        "dependencies_and_side_effects": "Rotating API credentials requires synchronizing updates across backend services and scheduled workers to avoid service downtime.",
+        "assumptions": ["Applications load environment variables via process manager or OS environment"],
+        "rollback_guidance": "If application fails to boot, verify the environment variable path in systemd or Docker container environment declarations.",
+        "verification_procedure": "curl -sI https://<TARGET_HOST>/.env | grep -E 'HTTP/|404|403'",
+    },
+    "VULN-EXPOSED-GIT-HEAD": {
+        "root_cause": "The .git metadata directory is publicly accessible inside the web server's published document root.",
+        "why_it_matters": "Exposing .git directory allows threat actors to download commit history, proprietary source code, and historical secrets embedded in commits.",
+        "actionable_fix": "Block web access to .git and hidden directories in web server configuration, or remove .git from production deployments.",
+        "implementation_steps": [
+            "1. Block web server requests matching /.git in reverse proxy or web server configuration.",
+            "2. Exclude .git directory from production deployment artifacts (use git archive or CI build steps).",
+            "3. Audit git log history for any hardcoded credentials and rotate them.",
+        ],
+        "code_snippets": {
+            "Nginx": (
+                "location ~ /\\.git {\n"
+                "    deny all;\n"
+                "    return 404;\n"
+                "}"
+            ),
+            "Apache": (
+                "<DirectoryMatch \"/\\.git\">\n"
+                "    Require all denied\n"
+                "</DirectoryMatch>"
+            ),
+            "Generic / Shell": "rm -rf /var/www/html/.git",
+        },
+        "effort_hours": 1.5,
+        "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration (nginx.conf / httpd.conf) and deployment packaging scripts",
+        "dependencies": ["Web server administration access"],
+        "dependencies_and_side_effects": "Blocking .git does not affect application functionality. If automated deployment uses 'git pull' in production, configure deployment to serve from a subfolder.",
+        "assumptions": ["Deployment artifacts are packaged without .git directory in production"],
+        "rollback_guidance": "Restore location block if web server syntax check fails.",
+        "verification_procedure": "curl -sI https://<TARGET_HOST>/.git/HEAD | grep -E 'HTTP/|404|403'",
+    },
+    "VULN-REDIRECT-HTTPS-DOWNGRADE": {
+        "root_cause": "A redirect hop transitions navigation from secure HTTPS to unencrypted HTTP.",
+        "why_it_matters": "Downgrading from HTTPS to HTTP nullifies TLS protections, exposing user traffic and session tokens to interception.",
+        "actionable_fix": "Update application routing and server redirect rules to strictly retain https:// scheme on all redirects.",
+        "implementation_steps": [
+            "1. Review reverse proxy X-Forwarded-Proto header configuration to ensure app knows it is behind TLS.",
+            "2. Ensure internal redirect URLs (e.g. 301, 302) use relative paths or explicit https:// schemes.",
+            "3. Enable HSTS to prevent browsers from following cleartext redirects.",
+        ],
+        "code_snippets": {
+            "Nginx": (
+                "# Ensure proxy passes HTTPS scheme\n"
+                "proxy_set_header X-Forwarded-Proto https;\n"
+                "proxy_redirect http:// https://;"
+            ),
+            "Apache": (
+                "RequestHeader set X-Forwarded-Proto \"https\"\n"
+                "ProxyPassReverseCookieDomain internal.example.com external.example.com"
+            ),
+            "Generic / Application": "// Ensure redirect URLs use HTTPS\nconst redirectUrl = targetUrl.replace(/^http:/, 'https:');",
+        },
+        "effort_hours": 2.0,
+        "service_cost": 0.0,
+        "file_or_config_location": "Reverse proxy configuration and application routing middleware",
+        "dependencies": ["Reverse proxy configuration access"],
+        "dependencies_and_side_effects": "Low risk; ensures all clients maintain secure encrypted transport.",
+        "assumptions": ["Application supports TLS terminated at reverse proxy"],
+        "rollback_guidance": "Revert proxy_redirect directive in Nginx/Apache if legacy HTTP-only upstream fails.",
+        "verification_procedure": "curl -sI https://<TARGET_HOST>/ | grep -i location",
+    },
 }
 
 

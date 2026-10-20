@@ -396,6 +396,63 @@ def verify_remediation(
             fix_verified = False
             evidence_desc = f"Could not reach /robots.txt: {str(e)}."
 
+    # 14. Sensitive File Exposure (.env)
+    elif finding_id == "VULN-EXPOSED-ENV-FILE":
+        try:
+            env_url = f"{'https' if resp.was_https else 'http'}://{host}" + (f":{port}" if port not in (80, 443) else "") + "/.env"
+            env_resp = client.request(env_url, allowed_origin_host=host)
+            if env_resp.status_code in (404, 403, 401):
+                fix_verified = True
+                evidence_desc = f"GET /.env returned HTTP {env_resp.status_code}. Public access is successfully blocked."
+            elif env_resp.status_code == 200:
+                is_html = "text/html" in (env_resp.get_header("content-type") or "").lower() or "<html" in env_resp.body_text.lower()[:200]
+                if is_html:
+                    fix_verified = True
+                    evidence_desc = "GET /.env returned custom HTML error/SPA fallback rather than plaintext configuration."
+                else:
+                    fix_verified = False
+                    evidence_desc = "GET /.env returned HTTP 200 with plaintext file content. File remains exposed."
+            else:
+                fix_verified = True
+                evidence_desc = f"GET /.env returned HTTP {env_resp.status_code}."
+        except Exception:
+            fix_verified = True
+            evidence_desc = "Connection to /.env refused or dropped. File is not publicly accessible."
+
+    # 15. Sensitive File Exposure (.git/HEAD)
+    elif finding_id == "VULN-EXPOSED-GIT-HEAD":
+        try:
+            git_url = f"{'https' if resp.was_https else 'http'}://{host}" + (f":{port}" if port not in (80, 443) else "") + "/.git/HEAD"
+            git_resp = client.request(git_url, allowed_origin_host=host)
+            if git_resp.status_code in (404, 403, 401):
+                fix_verified = True
+                evidence_desc = f"GET /.git/HEAD returned HTTP {git_resp.status_code}. Public repository access is blocked."
+            elif git_resp.status_code == 200:
+                is_html = "text/html" in (git_resp.get_header("content-type") or "").lower() or "<html" in git_resp.body_text.lower()[:200]
+                if is_html:
+                    fix_verified = True
+                    evidence_desc = "GET /.git/HEAD returned HTML error/SPA fallback rather than Git metadata."
+                else:
+                    fix_verified = False
+                    evidence_desc = "GET /.git/HEAD returned HTTP 200 with raw Git HEAD pointer. Repository metadata remains exposed."
+            else:
+                fix_verified = True
+                evidence_desc = f"GET /.git/HEAD returned HTTP {git_resp.status_code}."
+        except Exception:
+            fix_verified = True
+            evidence_desc = "Connection to /.git/HEAD refused or dropped."
+
+    # 16. Insecure Redirect Scheme Downgrade
+    elif finding_id == "VULN-REDIRECT-HTTPS-DOWNGRADE":
+        has_downgrade = False
+        if resp.redirect_chain:
+            for hop in resp.redirect_chain:
+                if hop.get("from_url", "").lower().startswith("https://") and hop.get("to_url", "").lower().startswith("http://"):
+                    has_downgrade = True
+                    break
+        fix_verified = not has_downgrade
+        evidence_desc = f"Redirect chain inspected ({len(resp.redirect_chain)} hops). Insecure HTTPS-to-HTTP downgrade observed: {has_downgrade}."
+
     else:
         # Unknown or manual finding type -> Inconclusive
         is_inconclusive = True

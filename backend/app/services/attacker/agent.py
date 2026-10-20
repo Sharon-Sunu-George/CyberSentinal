@@ -85,12 +85,15 @@ class AttackerAgentService:
         # Structure defender handover packet for the Defender Agent
         defender_handover = self._build_defender_handover(findings, normalized_url, summary)
 
+        target_class = request.target_class or scan_meta.get("target_class", "public")
+
         response = AttackerScanResponse(
             scan_id=actual_scan_id,
             target_url=request.target_url,
             normalized_url=normalized_url,
             scanned_at=scanned_at,
             status="completed" if not scan_meta.get("is_inconclusive") else "inconclusive",
+            target_class=target_class,
             target_ip=scan_meta.get("target_ip"),
             scanner_info=scan_meta.get("scanner_info", {}),
             scope_limitations=scan_meta.get("scope_limitations", ""),
@@ -108,6 +111,7 @@ class AttackerAgentService:
             "scan_id": actual_scan_id,
             "target_url": request.target_url,
             "normalized_url": normalized_url,
+            "target_class": target_class,
             "scanned_at": scanned_at,
             "status": "completed" if not scan_meta.get("is_inconclusive") else "inconclusive",
             "target_ip": scan_meta.get("target_ip"),

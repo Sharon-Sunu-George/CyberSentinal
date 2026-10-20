@@ -277,19 +277,29 @@ def list_scans() -> List[Dict[str, Any]]:
     description="Reports active scanner engine capabilities, supported checks, OWASP ZAP integration status, and local development scan configuration.",
 )
 def get_scanner_status() -> Dict[str, Any]:
-    from app.services.attacker.ssrf_guard import get_local_dev_target_config
+    from app.services.attacker.ssrf_guard import get_local_dev_target_config, get_internal_network_config
     zap_status = probe_owasp_zap_status()
     local_dev_cfg = get_local_dev_target_config()
+    internal_cfg = get_internal_network_config()
     return {
         "engine": "CyberSentinal Evidence-Based Scanner v2.0",
         "active_concurrent_scans": scan_limiter.active_scans,
         "max_concurrent_capacity": scan_limiter.max_concurrent,
+        "target_classes": {
+            "public": "External internet targets (bounded passive assessment of authorized sites)",
+            "local_dev": "Opt-in local development targets with explicit host/port allowlisting",
+            "private_network": "Private internal networks (denied by default; administrative allowlist required)",
+        },
         "owasp_zap": zap_status,
         "local_dev_scan": {
             "is_enabled": local_dev_cfg is not None,
             "target": local_dev_cfg.get("origin") if local_dev_cfg else None,
             "allowed_host": local_dev_cfg.get("host") if local_dev_cfg else None,
             "allowed_port": local_dev_cfg.get("port") if local_dev_cfg else None,
+        },
+        "internal_network_scan": {
+            "is_enabled": internal_cfg is not None,
+            "allowed_cidrs": [str(net) for net in internal_cfg["allowed_networks"]] if internal_cfg else [],
         },
         "supported_checks": [
             "Transport Security (HTTPS/HSTS)",
@@ -303,6 +313,8 @@ def get_scanner_status() -> Dict[str, Any]:
             "Server Banner Information Disclosure",
             "Robots.txt Sensitive Disallow Directives",
             "RFC 9116 security.txt Contact Directives",
+            "Public Sensitive File Exposure (/.env, /.git/HEAD)",
+            "Suspicious Redirects & Transport Downgrade",
             "Curated CVE Version Fingerprint Matching",
         ],
     }

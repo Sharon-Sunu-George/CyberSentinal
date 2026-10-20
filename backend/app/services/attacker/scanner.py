@@ -25,6 +25,7 @@ from app.services.attacker.cve_catalog import match_known_cve
 from app.services.attacker.ssrf_guard import (
     normalize_target_url,
     resolve_and_verify_ip,
+    classify_target,
     SSRFProtectionError,
 )
 
@@ -339,11 +340,13 @@ class EvidenceBasedScanner:
 
         # Check OWASP ZAP availability
         zap_status = probe_owasp_zap_status()
+        target_class = classify_target(target_url)
 
         scan_meta: Dict[str, Any] = {
             "target_url": target_url,
             "normalized_url": normalized_url,
             "target_host": hostname,
+            "target_class": target_class,
             "target_ip": None,
             "scanned_at": now,
             "scanner_name": self.scanner_name,
@@ -352,6 +355,7 @@ class EvidenceBasedScanner:
             "scanner_info": {
                 "engine": self.scanner_name,
                 "mode": "passive-safe",
+                "target_class": target_class,
                 "zap_integration": zap_status,
                 "checks_executed": [
                     "Transport Security & HTTPS (CWE-319)",
@@ -366,14 +370,16 @@ class EvidenceBasedScanner:
                     "Server & Runtime Banner Information Disclosure (CWE-200)",
                     "Sensitive Endpoints in robots.txt (CWE-200)",
                     "RFC 9116 security.txt Contact Configuration",
+                    "Public Sensitive File Exposure (CWE-552)",
+                    "Suspicious Redirects & Transport Downgrade (CWE-319)",
                     "CVE Knowledge Correlation (Exact Component Version Evidence)",
                 ],
             },
             "scope_limitations": (
                 "Scan is strictly limited to authorized external HTTP/TLS non-destructive auditing. "
                 "Checks include response header analysis, TLS configuration, cookie flags, exposed metadata files, "
-                "and component version matching. Does NOT perform invasive payload injection, automated exploit delivery, "
-                "fuzzing, or password cracking."
+                "non-destructive sensitive configuration file probes, and component version matching. "
+                "Does NOT perform invasive payload injection, automated exploit delivery, fuzzing, or password cracking."
             ),
         }
 
@@ -490,6 +496,12 @@ class EvidenceBasedScanner:
 
         # Check 8: Security.txt Presence
         self._check_security_txt(hostname, port, main_resp.was_https, findings, now)
+
+        # Check 9: Non-destructive Public Sensitive File Exposure (/.env, /.git/HEAD)
+        self._check_sensitive_files(hostname, port, main_resp.was_https, findings, now)
+
+        # Check 10: Suspicious Redirects & Insecure Downgrades
+        self._check_suspicious_redirects(main_resp, findings, now)
 
         # Deduplicate findings by ID
         unique_findings: List[VulnerabilityFinding] = []
@@ -1347,3 +1359,206 @@ class EvidenceBasedScanner:
                 # If 200 and has_contact and not is_html: Valid security.txt! No vulnerability finding.
         except Exception:
             pass
+
+    def _check_sensitive_files(self, host: str, port: int, is_https: bool, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        scheme = "https" if is_https else "http"
+        port_suffix = f":{port}" if (is_https and port != 443) or (not is_https and port != 80) else ""
+
+        # Probe 1: /.env
+        env_url = f"{scheme}://{host}{port_suffix}/.env"
+        try:
+            resp = self.client.request(env_url, allowed_origin_host=host)
+            # Differentiate genuine file from custom 404, login page, or SPA fallback
+            if resp.status_code == 200 and resp.body_text:
+                content_type = (resp.get_header("content-type") or "").lower()
+                body_lower = resp.body_text.lower()
+                is_html = (
+                    "text/html" in content_type
+                    or "<!doctype" in body_lower
+                    or "<html" in body_lower
+                    or "<head" in body_lower
+                    or "<body" in body_lower
+                )
+
+                # Check for standard environment assignment patterns
+                env_patterns = [
+                    r"(?i)\b(app_env|node_env|environment|debug)\s*=",
+                    r"(?i)\b(db_|database_)\w*\s*=",
+                    r"(?i)\b(aws_|azure_|gcp_)\w*\s*=",
+                    r"(?i)\b(secret_key|api_key|token|auth_key|password|jwt_secret)\s*=",
+                    r"(?i)\bport\s*=\s*\d+",
+                ]
+                has_env_pattern = any(re.search(pat, resp.body_text) for pat in env_patterns)
+
+                if not is_html and has_env_pattern:
+                    # REDACT SENSITIVE CREDENTIALS: Never store unredacted secrets!
+                    redacted_lines = []
+                    for line in resp.body_text.splitlines()[:20]:
+                        line_stripped = line.strip()
+                        if not line_stripped or line_stripped.startswith("#"):
+                            redacted_lines.append(line_stripped)
+                            continue
+                        if "=" in line_stripped:
+                            k, v = line_stripped.split("=", 1)
+                            key_clean = k.strip()
+                            # Redact sensitive variables
+                            if re.search(r"(?i)(password|secret|key|token|auth|pwd|cred|pass|private)", key_clean):
+                                redacted_lines.append(f"{key_clean}=[REDACTED_SECRET]")
+                            else:
+                                if len(v.strip()) > 3:
+                                    redacted_lines.append(f"{key_clean}=[REDACTED]")
+                                else:
+                                    redacted_lines.append(f"{key_clean}={v.strip()}")
+                        else:
+                            redacted_lines.append(line_stripped[:30])
+
+                    redacted_snippet = "\n".join(redacted_lines[:10])
+
+                    findings.append(
+                        VulnerabilityFinding(
+                            id="VULN-EXPOSED-ENV-FILE",
+                            title="Public Exposure of Environment Configuration File (.env)",
+                            category="Information Disclosure",
+                            severity="Critical",
+                            confidence="High",
+                            affected_url_or_component=env_url,
+                            evidence=FindingEvidence(
+                                check_type="sensitive_files",
+                                observed_data={
+                                    "status_code": 200,
+                                    "content_type": content_type,
+                                    "line_count": len(resp.body_text.splitlines()),
+                                    "redacted_keys": [
+                                        line.split("=")[0].strip()
+                                        for line in resp.body_text.splitlines()
+                                        if "=" in line and not line.strip().startswith("#")
+                                    ][:10],
+                                },
+                                raw_snippet=redacted_snippet,
+                                status_code=200,
+                                requested_url=env_url,
+                                final_url=resp.final_url,
+                                observed_headers={"content-type": content_type},
+                                check_result="Confirmed observation",
+                                confidence_reason="Direct empirical observation of a plaintext .env file exposed over HTTP with key-value environment declarations. All sensitive credentials have been redacted.",
+                                is_inferred=False,
+                                response_timestamp=resp.response_timestamp,
+                            ),
+                            potential_impact="Direct unauthenticated exposure of backend database credentials, third-party API keys, and cryptographic secrets. Immediate compromise of infrastructure and data storage.",
+                            remediation="Immediately delete or move the .env file out of the public web document root. Block all requests to hidden dotfiles (.*) in web server configuration. Rotate all exposed credentials immediately.",
+                            cwe_id="CWE-552",
+                            cve_id=None,
+                            scanner_name=self.scanner_name,
+                            scanned_at=ts,
+                            references=[
+                                "https://cwe.mitre.org/data/definitions/552.html",
+                                "https://cheatsheetseries.owasp.org/cheatsheets/DotNet_Security_Cheat_Sheet.html",
+                            ],
+                            is_confirmed=True,
+                            validation_status="Confirmed Observation",
+                        )
+                    )
+        except Exception:
+            pass
+
+        # Probe 2: /.git/HEAD
+        git_url = f"{scheme}://{host}{port_suffix}/.git/HEAD"
+        try:
+            resp = self.client.request(git_url, allowed_origin_host=host)
+            if resp.status_code == 200 and resp.body_text:
+                content_type = (resp.get_header("content-type") or "").lower()
+                body = resp.body_text.strip()
+                is_html = (
+                    "text/html" in content_type
+                    or "<!doctype" in body.lower()
+                    or "<html" in body.lower()
+                )
+                is_git_head = body.startswith("ref: refs/") or bool(re.match(r"^[0-9a-f]{40}$", body))
+
+                if not is_html and is_git_head:
+                    findings.append(
+                        VulnerabilityFinding(
+                            id="VULN-EXPOSED-GIT-HEAD",
+                            title="Public Exposure of Git Repository Metadata (.git/HEAD)",
+                            category="Information Disclosure",
+                            severity="High",
+                            confidence="High",
+                            affected_url_or_component=git_url,
+                            evidence=FindingEvidence(
+                                check_type="sensitive_files",
+                                observed_data={
+                                    "status_code": 200,
+                                    "content_type": content_type,
+                                    "head_content": body[:60],
+                                },
+                                raw_snippet=f"/.git/HEAD content: {body[:60]}",
+                                status_code=200,
+                                requested_url=git_url,
+                                final_url=resp.final_url,
+                                observed_headers={"content-type": content_type},
+                                check_result="Confirmed observation",
+                                confidence_reason="Direct empirical observation of exposed .git repository metadata (HEAD reference file).",
+                                is_inferred=False,
+                                response_timestamp=resp.response_timestamp,
+                            ),
+                            potential_impact="Attackers can reconstruct the complete source code repository, history, commit logs, and embedded historical secrets using automated tools.",
+                            remediation="Block public web server access to all .git directories and hidden files (e.g. location ~ /\\.git { deny all; } in Nginx).",
+                            cwe_id="CWE-552",
+                            cve_id=None,
+                            scanner_name=self.scanner_name,
+                            scanned_at=ts,
+                            references=[
+                                "https://cwe.mitre.org/data/definitions/552.html",
+                                "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/05-Review_Webpage_Content_for_Information_Leakage",
+                            ],
+                            is_confirmed=True,
+                            validation_status="Confirmed Observation",
+                        )
+                    )
+        except Exception:
+            pass
+
+    def _check_suspicious_redirects(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if not resp.redirect_chain:
+            return
+
+        for hop in resp.redirect_chain:
+            from_url = hop.get("from_url", "")
+            to_url = hop.get("to_url", "")
+            if from_url.lower().startswith("https://") and to_url.lower().startswith("http://"):
+                findings.append(
+                    VulnerabilityFinding(
+                        id="VULN-REDIRECT-HTTPS-DOWNGRADE",
+                        title="Insecure Transport Downgrade in Redirect Chain",
+                        category="Transport Security",
+                        severity="High",
+                        confidence="High",
+                        affected_url_or_component=from_url,
+                        evidence=FindingEvidence(
+                            check_type="redirect_analysis",
+                            observed_data={"from_url": from_url, "to_url": to_url, "status_code": hop.get("status_code")},
+                            raw_snippet=f"Redirect downgraded secure connection: {from_url} -> {to_url}",
+                            status_code=hop.get("status_code"),
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={},
+                            check_result="Confirmed observation",
+                            confidence_reason="Direct observation of HTTPS navigation redirecting to an insecure cleartext HTTP destination.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
+                        ),
+                        potential_impact="Users initially accessing the site securely over HTTPS are downgraded to plain HTTP, exposing credentials and traffic to man-in-the-middle attacks.",
+                        remediation="Configure all redirect locations to strictly preserve or upgrade to the HTTPS scheme.",
+                        cwe_id="CWE-319",
+                        cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html",
+                        ],
+                        is_confirmed=True,
+                        validation_status="Confirmed Observation",
+                    )
+                )
