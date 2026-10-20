@@ -37,3 +37,28 @@ def root():
         "documentation": "/docs",
         "api_v1_prefix": "/api/v1"
     }
+
+
+@app.get("/health", tags=["Health"])
+def health():
+    """
+    Operational health and readiness probe.
+    Checks application status and database availability.
+    """
+    from app.services.storage import get_db_connection
+    db_status = "healthy"
+    try:
+        conn = get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+    except Exception as e:
+        db_status = f"unhealthy: {str(e)}"
+
+    return {
+        "status": "healthy" if db_status == "healthy" else "degraded",
+        "app": "CyberSentinal API",
+        "version": "1.0.0",
+        "database": db_status,
+        "mode": "standalone-server",
+    }
+

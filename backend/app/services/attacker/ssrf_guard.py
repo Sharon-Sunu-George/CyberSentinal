@@ -151,8 +151,12 @@ def normalize_target_url(raw_url: str) -> Tuple[str, str, int, str]:
     if not hostname:
         raise SSRFProtectionError("Invalid URL hostname.")
 
-    # Determine port
-    port = parsed.port
+    # Determine port safely (urllib raises ValueError on out-of-range or malformed ports)
+    try:
+        port = parsed.port
+    except ValueError as e:
+        raise SSRFProtectionError(f"Malformed or out-of-range port: {str(e)}")
+
     if port is None:
         port = 443 if parsed.scheme.lower() == "https" else 80
 

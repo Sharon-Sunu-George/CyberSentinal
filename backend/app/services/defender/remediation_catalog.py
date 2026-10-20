@@ -49,12 +49,13 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "VULN-TLS-MISSING-HSTS": {
         "root_cause": "The web server serves HTTPS responses without the Strict-Transport-Security header, leaving users vulnerable to SSL stripping attacks on subsequent visits.",
-        "actionable_fix": "Add the Strict-Transport-Security header with a minimum one-year duration (31536000 seconds), includeSubDomains, and preload directives.",
+        "why_it_matters": "HSTS ensures browsers only connect via HTTPS. Without it, attackers on public Wi-Fi or compromised routers can perform SSL-stripping and intercept credentials in plain HTTP.",
+        "actionable_fix": "Add the Strict-Transport-Security header with a minimum one-year duration (31536000 seconds), includeSubDomains, and preload directives after verifying all subdomains support HTTPS.",
         "implementation_steps": [
             "1. Confirm all subdomains support HTTPS to prevent accidental outages when includeSubDomains is activated.",
-            "2. Add the Strict-Transport-Security response header to web server configuration.",
+            "2. Add the Strict-Transport-Security response header to web server configuration with max-age=31536000.",
             "3. Reload web server configuration without downtime.",
-            "4. (Optional) Submit domain to the Chromium HSTS Preload list (hstspreload.org).",
+            "4. CAUTION: Preload submission is permanent and difficult to revert. Verify thoroughly before submitting to hstspreload.org.",
         ],
         "code_snippets": {
             "Nginx": 'add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;',
@@ -73,85 +74,113 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "effort_hours": 2.0,
         "service_cost": 0.0,
-        "dependencies": ["Active HTTPS certificate"],
+        "file_or_config_location": "Web server (nginx.conf / httpd.conf) or reverse proxy edge",
+        "dependencies": ["Active HTTPS certificate on primary domain and all subdomains"],
+        "dependencies_and_side_effects": "If includeSubDomains is set and internal subdomains lack HTTPS certificates, clients will experience connection blocks. Ensure all subdomains possess valid TLS certificates.",
         "assumptions": ["All critical subdomains support HTTPS"],
+        "rollback_guidance": "If subdomains break, temporarily lower max-age to 0 or remove includeSubDomains and reload web server.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i strict-transport-security",
     },
     "VULN-SEC-HDR-NO-CSP": {
         "root_cause": "The application lacks a Content-Security-Policy (CSP) header, allowing unrestricted execution of inline scripts and unauthorized resource loading.",
-        "actionable_fix": "Define and enforce a restrictive Content-Security-Policy that whitelists only trusted script, style, and object origins.",
+        "why_it_matters": "Without CSP, cross-site scripting (XSS) attacks can execute arbitrary malicious JavaScript in the victim's browser, exfiltrate sensitive DOM data, or hijack sessions.",
+        "actionable_fix": "Deploy a safe starting Content-Security-Policy. Start with a non-breaking baseline in Report-Only mode, then enforce trusted origins, nonces for scripts, and frame-ancestors restrictions.",
         "implementation_steps": [
             "1. Audit third-party dependencies, analytics trackers, and external scripts loaded by the application.",
-            "2. Deploy initial policy in Report-Only mode ('Content-Security-Policy-Report-Only') to identify legitimate violations.",
-            "3. Refactor inline <script> blocks to use cryptographically random nonces or hashes.",
-            "4. Switch header from Report-Only to active enforcement mode ('Content-Security-Policy').",
+            "2. Deploy initial safe starting policy in Report-Only mode ('Content-Security-Policy-Report-Only') to monitor legitimate violations without breaking functional user experiences.",
+            "3. Refactor inline <script> blocks to use cryptographically random nonces or hashes (or 'self').",
+            "4. CAUTION: Avoid overly restrictive policies (e.g. blocking needed CDNs or analytics) without verification in staging.",
+            "5. Switch header from Report-Only to active enforcement mode ('Content-Security-Policy').",
         ],
         "code_snippets": {
             "Nginx": (
                 "add_header Content-Security-Policy \""
                 "default-src 'self'; "
-                "script-src 'self' 'nonce-$request_id'; "
+                "script-src 'self' https: 'unsafe-inline'; "
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: https:; "
+                "font-src 'self' https: data:; "
                 "object-src 'none'; "
                 "base-uri 'self'; "
                 "form-action 'self'; "
                 "frame-ancestors 'self';\" always;"
+            ),
+            "Apache": (
+                'Header always set Content-Security-Policy "'
+                "default-src 'self'; "
+                "script-src 'self' https: 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: https:; "
+                "object-src 'none'; "
+                "frame-ancestors 'self';\""
             ),
             "Express": (
                 "const helmet = require('helmet');\n"
                 "app.use(helmet.contentSecurityPolicy({\n"
                 "  directives: {\n"
                 "    defaultSrc: [\"'self'\"],\n"
-                "    scriptSrc: [\"'self'\"],\n"
+                "    scriptSrc: [\"'self'\", \"https:\", \"'unsafe-inline'\"],\n"
+                "    styleSrc: [\"'self'\", \"'unsafe-inline'\"],\n"
+                "    imgSrc: [\"'self'\", \"data:\", \"https:\"],\n"
                 "    objectSrc: [\"'none'\"],\n"
-                "    upgradeInsecureRequests: [],\n"
+                "    frameAncestors: [\"'self'\"],\n"
                 "  },\n"
                 "}));"
             ),
             "Next.js": (
-                "// Set CSP via middleware.ts with dynamic nonce\n"
-                "const cspHeader = `default-src 'self'; script-src 'self' 'nonce-${nonce}'; object-src 'none';`;\n"
+                "// Set CSP in middleware.ts or next.config.ts\n"
+                "const cspHeader = `default-src 'self'; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; object-src 'none'; frame-ancestors 'self';`;\n"
                 "response.headers.set('Content-Security-Policy', cspHeader);"
             ),
         },
         "effort_hours": 6.0,
         "service_cost": 0.0,
-        "dependencies": ["Asset dependency audit completed"],
-        "assumptions": ["Inline scripts can be refactored to nonces or external files"],
+        "file_or_config_location": "Web server (nginx.conf / httpd.conf) or application middleware (middleware.ts / server.js)",
+        "dependencies": ["Asset dependency inventory", "Audit of third-party script origins"],
+        "dependencies_and_side_effects": "Overly restrictive CSP policies may block third-party analytics, payment SDKs, or inline styles. Always test in staging using Content-Security-Policy-Report-Only first.",
+        "assumptions": ["Application assets are primarily served from same origin or trusted CDNs"],
+        "rollback_guidance": "If application scripts or styles break, immediately revert to Content-Security-Policy-Report-Only or remove the header directive and reload web server.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i content-security-policy",
     },
     "VULN-SEC-HDR-NO-XFO": {
         "root_cause": "The web application does not specify X-Frame-Options or CSP frame-ancestors, permitting third-party sites to render it inside hidden iframes.",
-        "actionable_fix": "Configure 'X-Frame-Options: SAMEORIGIN' (or 'DENY') and declare CSP 'frame-ancestors 'self''.",
+        "why_it_matters": "Clickjacking attacks lure authenticated users into clicking on invisible iframe overlays, triggering unintended financial transfers, permission grants, or account changes.",
+        "actionable_fix": "Configure 'X-Frame-Options: SAMEORIGIN' (or 'DENY') and complement with CSP 'frame-ancestors 'self''. Avoid conflicting directives.",
         "implementation_steps": [
             "1. Determine whether the site requires legitimate iframe embedding by partner domains.",
             "2. If embedding is never permitted, configure X-Frame-Options: DENY.",
             "3. If only same-origin framing is required, configure X-Frame-Options: SAMEORIGIN.",
-            "4. Add complementary CSP 'frame-ancestors 'self'' directive.",
+            "4. Add complementary CSP 'frame-ancestors 'self'' directive without syntax conflicts.",
         ],
         "code_snippets": {
             "Nginx": (
                 "add_header X-Frame-Options \"SAMEORIGIN\" always;\n"
                 "add_header Content-Security-Policy \"frame-ancestors 'self';\" always;"
             ),
-            "Apache": 'Header always set X-Frame-Options "SAMEORIGIN"',
+            "Apache": 'Header always set X-Frame-Options "SAMEORIGIN"\nHeader always set Content-Security-Policy "frame-ancestors \'self\';"',
             "Next.js": (
                 "headers: async () => [{\n"
                 "  source: '/(.*)',\n"
-                "  headers: [{ key: 'X-Frame-Options', value: 'SAMEORIGIN' }]\n"
+                "  headers: [\n"
+                "    { key: 'X-Frame-Options', value: 'SAMEORIGIN' },\n"
+                "    { key: 'Content-Security-Policy', value: \"frame-ancestors 'self';\" }\n"
+                "  ]\n"
                 "}]"
             ),
             "Express": "app.use(helmet.frameguard({ action: 'sameorigin' }));",
         },
         "effort_hours": 2.0,
         "service_cost": 0.0,
+        "file_or_config_location": "Web server (nginx.conf / httpd.conf) or edge CDN headers",
         "dependencies": [],
+        "dependencies_and_side_effects": "If partner portals embed this site in legitimate iframes, DENY will break their integration. Use CSP frame-ancestors https://partner.com in those cases.",
         "assumptions": ["Third-party framing is not a core business requirement"],
+        "rollback_guidance": "Remove X-Frame-Options directive or adjust frame-ancestors to include partner origins and reload server.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -E -i 'x-frame-options|frame-ancestors'",
     },
     "VULN-SEC-HDR-NO-NOSNIFF": {
         "root_cause": "The server omits the X-Content-Type-Options: nosniff header, allowing web browsers to override declared MIME types and execute uploaded files as script.",
+        "why_it_matters": "MIME-sniffing allows attackers who upload files (e.g. image with embedded script) to trick browsers into executing them as HTML/JavaScript.",
         "actionable_fix": "Add 'X-Content-Type-Options: nosniff' header across all HTTP responses.",
         "implementation_steps": [
             "1. Ensure all served static assets (CSS, JS, images, fonts) include accurate Content-Type response headers.",
@@ -165,13 +194,17 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "effort_hours": 1.0,
         "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration (nginx.conf / httpd.conf)",
         "dependencies": [],
+        "dependencies_and_side_effects": "Browsers will refuse to load stylesheets or scripts if their served MIME type does not match text/css or application/javascript. Ensure MIME types are correctly configured.",
         "assumptions": ["Server serves accurate Content-Type headers"],
+        "rollback_guidance": "Remove the directive from web server configuration and reload service.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i x-content-type-options",
     },
     "VULN-SEC-HDR-NO-REFERRER": {
         "root_cause": "The application lacks an explicit Referrer-Policy header, causing browsers to send full URLs including internal query parameters in Referer headers.",
-        "actionable_fix": "Set 'Referrer-Policy: strict-origin-when-cross-origin' to protect sensitive URL tokens from leaking to external domains.",
+        "why_it_matters": "Sensitive tokens, reset links, or user identifiers in URLs may leak to external third parties in Referer headers when users click outbound links.",
+        "actionable_fix": "Set 'Referrer-Policy: strict-origin-when-cross-origin' to protect sensitive URL tokens from leaking to external domains while preserving origin data.",
         "implementation_steps": [
             "1. Add 'Referrer-Policy: strict-origin-when-cross-origin' to server or CDN response headers.",
             "2. Verify external links preserve origin privacy while maintaining internal navigation context.",
@@ -183,16 +216,21 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "effort_hours": 1.0,
         "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration or application middleware",
         "dependencies": [],
-        "assumptions": ["Third-party analytics does not strictly require path referrers"],
+        "dependencies_and_side_effects": "Third-party analytics scripts that rely on seeing the full cross-origin URL path will receive only the origin domain. Core functionality is unaffected.",
+        "assumptions": ["Third-party analytics does not strictly require full URL query strings"],
+        "rollback_guidance": "Revert Referrer-Policy header setting in web server configuration and reload service.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i referrer-policy",
     },
     "VULN-SEC-HDR-NO-PERMISSIONS": {
         "root_cause": "The application lacks a Permissions-Policy header, leaving browser hardware APIs (camera, microphone, geolocation) accessible to embedded iframes and third-party scripts.",
-        "actionable_fix": "Add 'Permissions-Policy' to explicitly disable unnecessary hardware interfaces.",
+        "why_it_matters": "Malicious or compromised third-party scripts or iframes could attempt to access sensitive hardware APIs without explicit origin restrictions.",
+        "actionable_fix": "Add 'Permissions-Policy' to explicitly disable unnecessary hardware interfaces based on actual feature requirements.",
         "implementation_steps": [
-            "1. Review whether the application uses camera, microphone, or geolocation APIs.",
+            "1. Review whether the application requires camera, microphone, geolocation, or payment APIs.",
             "2. Add 'Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()' to web server response headers.",
+            "3. If specific features require hardware (e.g. video conferencing), whitelist only self: camera=(self).",
         ],
         "code_snippets": {
             "Nginx": 'add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;',
@@ -201,8 +239,11 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "effort_hours": 1.5,
         "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration (nginx.conf / httpd.conf)",
         "dependencies": [],
+        "dependencies_and_side_effects": "If the application later implements camera or geolocation features, this policy will block them until updated to allow 'self'.",
         "assumptions": ["Application does not rely on unrestricted camera/microphone"],
+        "rollback_guidance": "Remove or adjust Permissions-Policy directive in web server configuration and reload service.",
         "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i permissions-policy",
     },
     "VULN-CORS-WILDCARD-CREDENTIALS": {
@@ -345,11 +386,13 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "VULN-BEST-PRACTICE-NO-SECURITY-TXT": {
         "root_cause": "The organization does not publish an RFC 9116 security.txt contact file, making responsible vulnerability disclosure difficult for researchers.",
-        "actionable_fix": "Publish a cryptographically verified or signed RFC 9116 security.txt file at /.well-known/security.txt.",
+        "why_it_matters": "Security researchers finding vulnerabilities on your systems cannot easily report them to your security team without a published security.txt contact.",
+        "actionable_fix": "Publish an RFC 9116 compliant security.txt file at /.well-known/security.txt with valid Contact and Expires fields.",
         "implementation_steps": [
-            "1. Create a security contact mailbox (e.g. security@example.com).",
+            "1. Create a designated security contact mailbox or vulnerability disclosure URL (e.g. security@example.com).",
             "2. Draft /.well-known/security.txt with Contact, Expires, and Preferred-Languages fields.",
-            "3. Deploy file to public web root with Content-Type: text/plain.",
+            "3. Ensure the Expires date is set to a future timestamp within one year per RFC 9116.",
+            "4. Deploy file to public web root with Content-Type: text/plain.",
         ],
         "code_snippets": {
             "security.txt": (
@@ -359,11 +402,20 @@ REMEDIATION_CATALOG: Dict[str, Dict[str, Any]] = {
                 "Canonical: https://example.com/.well-known/security.txt\n"
                 "Policy: https://example.com/security-policy"
             ),
+            "Nginx": (
+                "location = /.well-known/security.txt {\n"
+                "    default_type text/plain;\n"
+                "    return 200 'Contact: mailto:security@example.com\\nExpires: 2027-12-31T23:59:59.000Z\\n';\n"
+                "}"
+            ),
         },
         "effort_hours": 1.0,
         "service_cost": 0.0,
-        "dependencies": ["Designated security contact email"],
-        "assumptions": ["Security mailbox is monitored by team"],
+        "file_or_config_location": "Public web root directory (.well-known/security.txt) or web server location block",
+        "dependencies": ["Designated security contact email or disclosure portal"],
+        "dependencies_and_side_effects": "Requires operational monitoring of the listed security inbox to triage external reports.",
+        "assumptions": ["Security mailbox is monitored by designated personnel"],
+        "rollback_guidance": "Remove the /.well-known/security.txt file from the web root or remove the Nginx location block.",
         "verification_procedure": "curl -s https://<TARGET_HOST>/.well-known/security.txt | grep -i contact",
     },
 }
@@ -387,6 +439,7 @@ def get_playbook_for_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
         cve_name = cve_id or finding_id.replace("VULN-", "")
         return {
             "root_cause": f"Disclosed component matches published {cve_name} with known security advisories.",
+            "why_it_matters": f"Public vulnerabilities ({cve_name}) are actively probed and targeted by automated exploit frameworks on the public internet.",
             "actionable_fix": finding.get(
                 "remediation",
                 f"Immediately upgrade affected component to latest vendor patch release addressing {cve_name}."
@@ -402,14 +455,18 @@ def get_playbook_for_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
             },
             "effort_hours": 8.0,
             "service_cost": 0.0,
+            "file_or_config_location": "Operating system package manager or application dependency manifest (package.json / requirements.txt)",
             "dependencies": ["Staging environment verification", "Vendor patch availability"],
+            "dependencies_and_side_effects": "Upgrading packages across major or minor revisions may introduce breaking API changes. Test in non-production environments first.",
             "assumptions": ["Vendor has published an official patch"],
+            "rollback_guidance": "Pin package version to previous release in package manager or restore VM snapshot if upgrade causes regression.",
             "verification_procedure": "curl -sI https://<TARGET_HOST> | grep -i server (verify patched version)",
         }
 
     # Fallback for generic findings
     return {
         "root_cause": finding.get("potential_impact", "Configuration or design weakness observed in active web service."),
+        "why_it_matters": "Weaknesses in transport, header, or cookie configurations reduce perimeter defense-in-depth and expose users to preventable attacks.",
         "actionable_fix": finding.get("remediation", "Apply vendor security best practices and harden web server configuration."),
         "implementation_steps": [
             "1. Review observed evidence and identify affected component.",
@@ -419,7 +476,10 @@ def get_playbook_for_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
         "code_snippets": {},
         "effort_hours": 2.5,
         "service_cost": 0.0,
+        "file_or_config_location": "Web server configuration or application environment settings",
         "dependencies": [],
+        "dependencies_and_side_effects": "Configuration changes should be vetted in staging to ensure client compatibility.",
         "assumptions": ["Standard engineering workflow applied"],
+        "rollback_guidance": "Revert configuration directives in web server configuration and restart service.",
         "verification_procedure": f"curl -sI {finding.get('affected_url_or_component', 'target')}",
     }

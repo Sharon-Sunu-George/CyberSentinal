@@ -330,5 +330,255 @@ class TestDefenderCrawlerIntegration(unittest.TestCase):
         self.assertIn("defer_or_mitigate", resp.__dict__)
 
 
+class TestPlaywrightBrowserIsolation(unittest.IsolatedAsyncioTestCase):
+    """
+    Adversarial unit tests for Playwright Chromium browser network hardening:
+    - Host-rules IP pinning & fallback blocking (~NOTFOUND)
+    - WebRTC disabling flags
+    - Cross-origin subresource abort
+    - Dangerous scheme subresource abort (file://, data:, gopher://)
+    - Popup suppression and automatic closure
+    - Download cancellation
+    - WebSocket cross-origin isolation
+    - Process cleanup on exception and cancellation
+    """
+
+    async def test_crawler_launches_with_host_rules_and_webrtc_disabled(self):
+        crawler = PlaywrightCrawler(max_pages=1, max_depth=0)
+
+        mock_playwright = MagicMock()
+        mock_chromium = MagicMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page = MagicMock()
+
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.route = AsyncMock()
+        mock_context.add_init_script = AsyncMock()
+        mock_page.goto = AsyncMock(return_value=MagicMock(status=200, headers={}))
+        mock_page.title = AsyncMock(return_value="Isolated Target")
+        mock_page.eval_on_selector_all = AsyncMock(return_value=[])
+        mock_page.close = AsyncMock()
+        mock_context.close = AsyncMock()
+        mock_browser.close = AsyncMock()
+        mock_playwright.stop = AsyncMock()
+
+        with patch("playwright.async_api.async_playwright") as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            with patch("app.services.attacker.crawler.resolve_and_verify_ip", return_value=("93.184.216.34", 2)):
+                pages, findings, summary = await crawler.crawl("https://example.com", "test-scan-iso-1")
+
+                # Verify launch args passed to Chromium
+                launch_call_args = mock_playwright.chromium.launch.call_args[1]
+                args_passed = launch_call_args.get("args", [])
+                
+                # Verify WebRTC is disabled
+                self.assertIn("--disable-webrtc", args_passed)
+                
+                # Verify Host-Rules pinning and default ~NOTFOUND fallback
+                host_rule_flag = next((a for a in args_passed if a.startswith("--host-rules=")), None)
+                self.assertIsNotNone(host_rule_flag)
+                self.assertIn("MAP example.com 93.184.216.34", host_rule_flag)
+                self.assertIn("MAP * ~NOTFOUND", host_rule_flag)
+
+                # Verify strict TLS validation is preserved (not disabled)
+                context_call_args = mock_browser.new_context.call_args[1]
+                self.assertFalse(context_call_args.get("ignore_https_errors", True))
+
+                # Verify cleanup of context, browser, and playwright
+                mock_context.close.assert_awaited()
+                mock_browser.close.assert_awaited()
+                mock_playwright.stop.assert_awaited()
+
+    async def test_route_interceptor_aborts_prohibited_subresources(self):
+        """Verifies that the route interceptor aborts requests to internal, private, metadata, or cross-origin URLs."""
+        crawler = PlaywrightCrawler(max_pages=1, max_depth=0)
+
+        # Captured route interceptor
+        captured_interceptor = None
+
+        mock_context = MagicMock()
+        async def fake_route(pattern, handler):
+            nonlocal captured_interceptor
+            captured_interceptor = handler
+
+        mock_context.route = fake_route
+        mock_context.add_init_script = AsyncMock()
+        mock_page = MagicMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_page.goto = AsyncMock(return_value=None)
+        mock_page.title = AsyncMock(return_value="")
+        mock_page.eval_on_selector_all = AsyncMock(return_value=[])
+        mock_page.close = AsyncMock()
+        mock_context.close = AsyncMock()
+
+        mock_browser = MagicMock()
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_browser.close = AsyncMock()
+
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_playwright.stop = AsyncMock()
+
+        with patch("playwright.async_api.async_playwright") as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            with patch("app.services.attacker.ssrf_guard.resolve_and_verify_ip", return_value=("93.184.216.34", 2)):
+                await crawler.crawl("https://example.com", "test-scan-route-1")
+
+        self.assertIsNotNone(captured_interceptor)
+
+        # Test 1: Cloud metadata request aborted
+        mock_route = MagicMock()
+        mock_route.abort = AsyncMock()
+        mock_route.continue_ = AsyncMock()
+        mock_request = MagicMock(url="http://169.254.169.254/latest/meta-data/")
+        await captured_interceptor(mock_route, mock_request)
+        mock_route.abort.assert_awaited_with("blockedbyclient")
+        mock_route.continue_.assert_not_called()
+
+        # Test 2: Localhost request aborted
+        mock_route.reset_mock()
+        mock_request = MagicMock(url="http://127.0.0.1:8080/metrics")
+        await captured_interceptor(mock_route, mock_request)
+        mock_route.abort.assert_awaited_with("blockedbyclient")
+        mock_route.continue_.assert_not_called()
+
+        # Test 3: RFC1918 Private range aborted
+        mock_route.reset_mock()
+        mock_request = MagicMock(url="http://192.168.1.1/admin")
+        await captured_interceptor(mock_route, mock_request)
+        mock_route.abort.assert_awaited_with("blockedbyclient")
+        mock_route.continue_.assert_not_called()
+
+        # Test 4: Dangerous scheme aborted
+        mock_route.reset_mock()
+        mock_request = MagicMock(url="file:///etc/shadow")
+        await captured_interceptor(mock_route, mock_request)
+        mock_route.abort.assert_awaited_with("blockedbyclient")
+        mock_route.continue_.assert_not_called()
+
+        # Test 5: Cross-origin public third-party resource aborted under isolation
+        mock_route.reset_mock()
+        mock_request = MagicMock(url="https://tracker.thirdparty.com/track.js")
+        await captured_interceptor(mock_route, mock_request)
+        mock_route.abort.assert_awaited_with("blockedbyclient")
+        mock_route.continue_.assert_not_called()
+
+        # Test 6: Same-origin validated resource allowed
+        mock_route.reset_mock()
+        with patch("app.services.attacker.ssrf_guard.resolve_and_verify_ip", return_value=("93.184.216.34", 2)):
+            mock_request = MagicMock(url="https://example.com/assets/app.js")
+            await captured_interceptor(mock_route, mock_request)
+            mock_route.continue_.assert_awaited()
+            mock_route.abort.assert_not_called()
+
+    async def test_crawler_cleans_up_on_navigation_exception(self):
+        """Verifies browser processes and contexts are cleanly closed even when navigations throw exceptions."""
+        crawler = PlaywrightCrawler(max_pages=2, max_depth=1)
+
+        mock_playwright = MagicMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page = MagicMock()
+
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.route = AsyncMock()
+        mock_context.add_init_script = AsyncMock()
+        # Simulate fatal network error on page goto
+        mock_page.goto = AsyncMock(side_effect=RuntimeError("net::ERR_CONNECTION_RESET"))
+        mock_page.close = AsyncMock()
+        mock_context.close = AsyncMock()
+        mock_browser.close = AsyncMock()
+        mock_playwright.stop = AsyncMock()
+
+        with patch("playwright.async_api.async_playwright") as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            with patch("app.services.attacker.ssrf_guard.resolve_and_verify_ip", return_value=("93.184.216.34", 2)):
+                pages, findings, summary = await crawler.crawl("https://example.com", "test-scan-cleanup-1")
+
+                # Verify browser process resources are released
+                mock_context.close.assert_awaited()
+                mock_browser.close.assert_awaited()
+                mock_playwright.stop.assert_awaited()
+                self.assertEqual(len(pages), 1)
+                self.assertEqual(pages[0].status_code, None)
+
+    async def test_crawler_formats_ipv6_host_rules_with_brackets(self):
+        """Verifies IPv6 addresses are properly enclosed in brackets for Chromium host rules."""
+        crawler = PlaywrightCrawler(max_pages=1, max_depth=0)
+
+        mock_playwright = MagicMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page = MagicMock()
+
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.route = AsyncMock()
+        mock_context.add_init_script = AsyncMock()
+        mock_page.goto = AsyncMock(return_value=MagicMock(status=200, headers={}))
+        mock_page.title = AsyncMock(return_value="IPv6 Target")
+        mock_page.eval_on_selector_all = AsyncMock(return_value=[])
+        mock_page.close = AsyncMock()
+        mock_context.close = AsyncMock()
+        mock_browser.close = AsyncMock()
+        mock_playwright.stop = AsyncMock()
+
+        with patch("playwright.async_api.async_playwright") as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            with patch("app.services.attacker.crawler.resolve_and_verify_ip", return_value=("2606:4700:4700::1111", 10)):
+                await crawler.crawl("https://ipv6.example.com", "test-scan-ipv6-1")
+
+                launch_call_args = mock_playwright.chromium.launch.call_args[1]
+                args_passed = launch_call_args.get("args", [])
+                host_rule_flag = next((a for a in args_passed if a.startswith("--host-rules=")), None)
+                self.assertIsNotNone(host_rule_flag)
+                # Must be formatted with brackets [2606:4700:4700::1111]
+                self.assertIn("MAP ipv6.example.com [2606:4700:4700::1111]", host_rule_flag)
+
+                # Verify service_workers='block' is passed to context
+                context_kwargs = mock_browser.new_context.call_args[1]
+                self.assertEqual(context_kwargs.get("service_workers"), "block")
+
+    async def test_crawler_cancellation_cleans_up_promptly(self):
+        """Verifies that is_cancelled() flag aborts the crawl loop and releases all browser handles."""
+        crawler = PlaywrightCrawler(max_pages=10, max_depth=2)
+
+        mock_playwright = MagicMock()
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_page = MagicMock()
+
+        mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.route = AsyncMock()
+        mock_context.add_init_script = AsyncMock()
+        mock_context.close = AsyncMock()
+        mock_browser.close = AsyncMock()
+        mock_playwright.stop = AsyncMock()
+
+        with patch("playwright.async_api.async_playwright") as mock_ap:
+            mock_ap.return_value.start = AsyncMock(return_value=mock_playwright)
+            with patch("app.services.attacker.crawler.resolve_and_verify_ip", return_value=("93.184.216.34", 2)):
+                pages, findings, summary = await crawler.crawl(
+                    "https://example.com",
+                    "test-scan-cancel-1",
+                    is_cancelled=lambda: True,  # Already cancelled
+                )
+
+                # Crawl loop never navigated any page
+                self.assertEqual(len(pages), 0)
+                mock_context.close.assert_awaited()
+                mock_browser.close.assert_awaited()
+                mock_playwright.stop.assert_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
+

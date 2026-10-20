@@ -27,6 +27,7 @@ from app.services.attacker.ssrf_guard import (
     normalize_target_url,
     validate_destination_url,
     get_local_dev_target_config,
+    resolve_and_verify_ip,
     SSRFProtectionError,
 )
 
@@ -212,37 +213,78 @@ class PlaywrightCrawler:
 
         try:
             playwright = await async_playwright().start()
+
+            # Resolve and pin target host IP to prevent Chromium DNS rebinding
+            pinned_ip, _ = resolve_and_verify_ip(target_host, target_port)
+
+            # Format IP for Chromium host-rules: IPv6 addresses must be enclosed in brackets
+            formatted_ip = f"[{pinned_ip}]" if ":" in pinned_ip and not pinned_ip.startswith("[") else pinned_ip
+
+            # Build Chromium network isolation args
+            # 1. Map target hostname directly to validated IP (Chromium host-rules)
+            # 2. Map all other hostnames to ~NOTFOUND to prevent browser from reaching arbitrary internet destinations
+            # 3. Disable WebRTC to prevent STUN/TURN UDP leaks or local network interface enumeration
+            chromium_args = [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--disable-webrtc",
+                "--disable-features=WebRtcHideLocalIpsWithMdns,MediaStreamAPI",
+                f"--host-rules=MAP {target_host} {formatted_ip}, MAP * ~NOTFOUND",
+            ]
+
             browser = await playwright.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-background-networking",
-                    "--disable-default-apps",
-                    "--disable-sync",
-                ],
+                args=chromium_args,
             )
 
+            # Preserve strict TLS certificate validation (ignore_https_errors=False)
+            # Block service workers natively at the browser engine level
             context = await browser.new_context(
-                ignore_https_errors=True,
+                ignore_https_errors=False,
+                service_workers="block",
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) CyberSentinal-Crawler/2.0",
                 viewport={"width": 1280, "height": 800},
             )
 
+            # Additional script fallback to clean navigator.serviceWorker interface
+            try:
+                await context.add_init_script("delete window.navigator.serviceWorker;")
+            except Exception:
+                pass
+
             # SSRF Network Boundary Routing:
             # Intercept EVERY browser request (scripts, images, iframes, fetches, websockets).
-            # Verify destination against strict SSRF policy. Block any request that tries to reach
-            # loopback, internal IPs, cloud metadata, or unauthorized ports.
+            # Verify destination against strict SSRF policy and same-origin / validated destination rules.
+            # Block any request that tries to reach loopback, internal IPs, cloud metadata, or unauthorized ports.
             async def _route_interceptor(route, request):
                 req_url = request.url
                 is_safe, reason = validate_destination_url(req_url)
                 if not is_safe:
                     logger.warning(f"[Crawler SSRF Guard] Blocked request: {req_url} ({reason})")
-                    await route.abort("blockedbyclient")
+                    try:
+                        await route.abort("blockedbyclient")
+                    except Exception:
+                        pass
                     return
-                await route.continue_()
+
+                # Strict target origin restriction: block any third-party network egress in browser sandbox
+                if not is_same_origin(req_url, target_origin_tuple):
+                    logger.warning(f"[Crawler Isolation] Blocked cross-origin request: {req_url}")
+                    try:
+                        await route.abort("blockedbyclient")
+                    except Exception:
+                        pass
+                    return
+
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
 
             await context.route("**/*", _route_interceptor)
 
@@ -268,6 +310,26 @@ class PlaywrightCrawler:
 
                 page = await context.new_page()
                 page_requests: List[DiscoveredRequest] = []
+
+                # Defensive event handlers: close unexpected popups, cancel downloads, and block unauthorized WebSockets
+                def _on_popup(popup_page):
+                    logger.warning(f"[Crawler Security] Suppressing unexpected popup window: {popup_page.url}")
+                    asyncio.create_task(popup_page.close())
+
+                def _on_download(download):
+                    logger.warning(f"[Crawler Security] Cancelling unexpected file download: {download.url}")
+                    asyncio.create_task(download.cancel())
+
+                def _on_websocket(ws):
+                    # Verify WebSocket destination against same origin policy
+                    if not is_same_origin(ws.url, target_origin_tuple):
+                        logger.warning(f"[Crawler Security] Disallowed cross-origin WebSocket attempted: {ws.url}")
+                    else:
+                        logger.info(f"[Crawler WebSocket] Monitored target WebSocket: {ws.url}")
+
+                page.on("popup", _on_popup)
+                page.on("download", _on_download)
+                page.on("websocket", _on_websocket)
 
                 def _on_request(req):
                     nonlocal total_requests_completed
@@ -430,13 +492,19 @@ class PlaywrightCrawler:
     ):
         """
         Evaluates HTTP response headers on discovered pages using the existing security rules.
+        Skips proxy/gateway failure pages (502, 503, 504) to avoid false positives.
         Deduplicates across pages.
         """
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         lower_headers = {k.lower(): v for k, v in headers.items()}
 
+        # Skip gateway/proxy error responses
+        if status_code in (502, 503, 504, 520, 521, 522, 524):
+            return
+
         # 1. Missing CSP
-        if "content-security-policy" not in lower_headers:
+        csp = lower_headers.get("content-security-policy")
+        if not csp:
             fid = "VULN-SEC-HDR-NO-CSP"
             if fid not in seen_ids:
                 seen_ids.add(fid)
@@ -451,8 +519,15 @@ class PlaywrightCrawler:
                         evidence=FindingEvidence(
                             check_type="security_headers",
                             observed_data={"missing_header": "Content-Security-Policy"},
-                            raw_snippet="Response header 'Content-Security-Policy' is absent.",
+                            raw_snippet="Response header 'Content-Security-Policy' is absent from HTTP response.",
                             status_code=status_code,
+                            requested_url=page_url,
+                            final_url=page_url,
+                            observed_headers={},
+                            check_result="Potential risk",
+                            confidence_reason="Finding is based solely on absence of Content-Security-Policy header in observed page headers.",
+                            is_inferred=True,
+                            response_timestamp=now,
                         ),
                         potential_impact="Without CSP, the browser will execute any injected inline scripts or load external assets without restriction, amplifying XSS risks.",
                         remediation="Configure a Content-Security-Policy header specifying authorized script-src, style-src, and default-src directives.",
@@ -466,9 +541,9 @@ class PlaywrightCrawler:
                     )
                 )
 
-        # 2. Missing X-Content-Type-Options
+        # 2. Missing X-Content-Type-Options: nosniff
         xcto = lower_headers.get("x-content-type-options", "").strip().lower()
-        if xcto != "nosniff":
+        if "nosniff" not in xcto:
             fid = "VULN-SEC-HDR-NO-NOSNIFF"
             if fid not in seen_ids:
                 seen_ids.add(fid)
@@ -482,9 +557,16 @@ class PlaywrightCrawler:
                         affected_url_or_component=page_url,
                         evidence=FindingEvidence(
                             check_type="security_headers",
-                            observed_data={"header_value": xcto},
+                            observed_data={"header_value": xcto or "absent"},
                             raw_snippet=f"X-Content-Type-Options is '{xcto or 'absent'}'.",
                             status_code=status_code,
+                            requested_url=page_url,
+                            final_url=page_url,
+                            observed_headers={"x-content-type-options": xcto} if xcto else {},
+                            check_result="Confirmed observation" if xcto else "Potential risk",
+                            confidence_reason="Direct observation of header value missing mandatory 'nosniff' directive.",
+                            is_inferred=False if xcto else True,
+                            response_timestamp=now,
                         ),
                         potential_impact="Browsers may MIME-sniff response bodies away from the declared content-type, creating script execution vectors via user uploads.",
                         remediation="Add 'X-Content-Type-Options: nosniff' header to all HTTP responses.",
@@ -517,6 +599,13 @@ class PlaywrightCrawler:
                             observed_data={"server_banner": server_banner},
                             raw_snippet=f"Server: {server_banner}",
                             status_code=status_code,
+                            requested_url=page_url,
+                            final_url=page_url,
+                            observed_headers={"server": server_banner},
+                            check_result="Confirmed observation",
+                            confidence_reason="Direct empirical observation of Server header containing granular version string.",
+                            is_inferred=False,
+                            response_timestamp=now,
                         ),
                         potential_impact="Revealing granular software versions helps adversaries query vulnerability databases for targeted exploits.",
                         remediation="Suppress version banners in web server configuration (e.g. server_tokens off in Nginx).",

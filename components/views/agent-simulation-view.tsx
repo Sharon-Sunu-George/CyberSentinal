@@ -114,11 +114,20 @@ export function AgentSimulationView() {
   // ==========================================
   const [availableBudget, setAvailableBudget] = useState<number>(5000)
   const [hourlyRate, setHourlyRate] = useState<number>(125)
+  const [currency, setCurrency] = useState<string>("USD")
   const [isAnalyzingDefender, setIsAnalyzingDefender] = useState(false)
   const [defenderPlan, setDefenderPlan] = useState<DefenderAnalysisResponse | null>(null)
   const [defenderError, setDefenderError] = useState<string | null>(null)
   const [activePriorityTab, setActivePriorityTab] = useState<"fix_immediately" | "fix_next" | "defer_or_mitigate" | "all">("fix_immediately")
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({})
+  const [isVerifying, setIsVerifying] = useState<Record<string, boolean>>({})
+  const [verificationFeedback, setVerificationFeedback] = useState<Record<string, {
+    success: boolean
+    message: string
+    new_status: string
+    is_inconclusive?: boolean
+    evidence?: any
+  }>>({})
 
   // ==========================================
   // SIMULATED DEMO SANDBOX STATE (PRESERVED)
@@ -393,7 +402,8 @@ export function AgentSimulationView() {
     url: string,
     findings: VulnerabilityFinding[],
     budget: number,
-    rate: number
+    rate: number,
+    curr: string = currency
   ) => {
     setIsAnalyzingDefender(true)
     setDefenderError(null)
@@ -405,6 +415,7 @@ export function AgentSimulationView() {
         findings: findings,
         available_budget: budget,
         hourly_rate: rate,
+        currency: curr,
       })
       setDefenderPlan(plan)
     } catch (err: any) {
@@ -421,7 +432,8 @@ export function AgentSimulationView() {
       scanResult.target_url,
       scanResult.findings,
       availableBudget,
-      hourlyRate
+      hourlyRate,
+      currency
     )
   }
 
@@ -436,7 +448,9 @@ export function AgentSimulationView() {
       if (defenderPlan) {
         const updateList = (list: RemediationRecommendation[]) =>
           list.map((item) =>
-            item.finding_id === findingId ? { ...item, status: newStatus as any } : item
+            item.finding_id === findingId
+              ? { ...item, status: newStatus as any, remediation_status: newStatus }
+              : item
           )
 
         setDefenderPlan({
@@ -459,6 +473,66 @@ export function AgentSimulationView() {
       setDefenderError(`Failed to update status: ${err.message}`)
     } finally {
       setStatusUpdating((prev) => ({ ...prev, [findingId]: false }))
+    }
+  }
+
+  const handleVerifyRemediation = async (findingId: string) => {
+    if (!scanResult) return
+    setIsVerifying((prev) => ({ ...prev, [findingId]: true }))
+    setDefenderError(null)
+
+    try {
+      const result = await apiClient.verifyRemediation(scanResult.scan_id, findingId)
+
+      setVerificationFeedback((prev) => ({
+        ...prev,
+        [findingId]: {
+          success: result.is_verified,
+          message: result.message,
+          new_status: result.new_status,
+          is_inconclusive: result.is_inconclusive,
+          evidence: result.observed_headers,
+        },
+      }))
+
+      // Update local plan & findings status
+      if (defenderPlan) {
+        const updateList = (list: RemediationRecommendation[]) =>
+          list.map((item) =>
+            item.finding_id === findingId
+              ? {
+                  ...item,
+                  status: result.new_status as any,
+                  remediation_status: result.new_status,
+                  verification_evidence: {
+                    is_verified: result.is_verified,
+                    observed_headers: result.observed_headers,
+                    observed_status: result.observed_status,
+                    verification_timestamp: result.verification_timestamp,
+                  },
+                }
+              : item
+          )
+
+        setDefenderPlan({
+          ...defenderPlan,
+          fix_immediately: updateList(defenderPlan.fix_immediately),
+          fix_next: updateList(defenderPlan.fix_next),
+          defer_or_mitigate: updateList(defenderPlan.defer_or_mitigate),
+          unbudgeted_high_risk_findings: updateList(defenderPlan.unbudgeted_high_risk_findings),
+        })
+      }
+
+      setScanResult({
+        ...scanResult,
+        findings: scanResult.findings.map((f) =>
+          f.id === findingId ? { ...f, remediation_status: result.new_status as any } : f
+        ),
+      })
+    } catch (err: any) {
+      setDefenderError(`Verification failed: ${err.message}`)
+    } finally {
+      setIsVerifying((prev) => ({ ...prev, [findingId]: false }))
     }
   }
 
@@ -682,6 +756,24 @@ export function AgentSimulationView() {
         return "bg-blue-500/15 text-blue-400 border-blue-500/30"
       case "Accepted Risk":
         return "bg-purple-500/15 text-purple-400 border-purple-500/30"
+      default:
+        return "bg-muted/50 text-muted-foreground border-border"
+    }
+  }
+
+  const getValidationBadgeClass = (valStatus?: string) => {
+    switch (valStatus?.toLowerCase()) {
+      case "confirmed observation":
+        return "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+      case "potential risk":
+      case "security weakness":
+        return "bg-amber-500/15 text-amber-400 border-amber-500/30"
+      case "inconclusive":
+      case "requires further validation":
+      case "informational observation":
+        return "bg-blue-500/15 text-blue-400 border-blue-500/30"
+      case "scan error":
+        return "bg-rose-500/15 text-rose-400 border-rose-500/30"
       default:
         return "bg-muted/50 text-muted-foreground border-border"
     }
@@ -1025,10 +1117,10 @@ export function AgentSimulationView() {
 
                 <CardContent className="space-y-4">
                   {/* Budget Configuration Form */}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium text-foreground flex items-center gap-1">
-                        <DollarSign className="size-3.5 text-primary" /> Remediation Budget (USD)
+                        <DollarSign className="size-3.5 text-primary" /> Budget
                       </label>
                       <input
                         type="number"
@@ -1043,7 +1135,25 @@ export function AgentSimulationView() {
 
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium text-foreground flex items-center gap-1">
-                        <Clock className="size-3.5 text-primary" /> Engineering Rate ($/hr)
+                        <Globe className="size-3.5 text-primary" /> Currency
+                      </label>
+                      <select
+                        value={currency}
+                        onChange={(e) => setCurrency(e.target.value)}
+                        disabled={isAnalyzingDefender}
+                        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring font-mono font-semibold"
+                      >
+                        <option value="USD">USD ($)</option>
+                        <option value="EUR">EUR (€)</option>
+                        <option value="GBP">GBP (£)</option>
+                        <option value="CAD">CAD ($)</option>
+                        <option value="AUD">AUD ($)</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-foreground flex items-center gap-1">
+                        <Clock className="size-3.5 text-primary" /> Labor Rate (/hr)
                       </label>
                       <input
                         type="number"
@@ -1096,7 +1206,7 @@ export function AgentSimulationView() {
                         <div className="rounded-lg border bg-muted/20 p-2.5 space-y-0.5">
                           <span className="text-[10px] text-muted-foreground block">Proposed Spending</span>
                           <span className="font-mono text-sm font-bold text-foreground">
-                            ${defenderPlan.proposed_spending.toLocaleString()} / ${defenderPlan.available_budget.toLocaleString()}
+                            {defenderPlan.currency || currency} {defenderPlan.proposed_spending.toLocaleString()} / {defenderPlan.available_budget.toLocaleString()}
                           </span>
                         </div>
 
@@ -1112,8 +1222,8 @@ export function AgentSimulationView() {
                           </span>
                           <span className="font-mono text-sm font-bold">
                             {defenderPlan.budget_shortfall > 0
-                              ? `-$${defenderPlan.budget_shortfall.toLocaleString()}`
-                              : `+$${defenderPlan.remaining_budget.toLocaleString()}`}
+                              ? `-${defenderPlan.currency || currency} ${defenderPlan.budget_shortfall.toLocaleString()}`
+                              : `+${defenderPlan.currency || currency} ${defenderPlan.remaining_budget.toLocaleString()}`}
                           </span>
                         </div>
                       </div>
@@ -1132,10 +1242,18 @@ export function AgentSimulationView() {
                         <div className="text-right">
                           <span className="text-[10px] text-muted-foreground block">Cost Efficiency</span>
                           <span className="text-xs font-mono font-bold text-foreground">
-                            {defenderPlan.risk_reduction_per_dollar} pts / $1k
+                            {defenderPlan.risk_reduction_per_dollar} pts / 1k {defenderPlan.currency || currency}
                           </span>
                         </div>
                       </div>
+
+                      {/* Cost Assumptions Note */}
+                      {defenderPlan.cost_assumptions && (
+                        <div className="rounded-md border bg-muted/20 px-3 py-1.5 text-[11px] text-muted-foreground flex items-center justify-between">
+                          <span>{defenderPlan.cost_assumptions}</span>
+                          <span className="font-mono font-semibold text-foreground">Rate: {defenderPlan.currency || currency} {defenderPlan.hourly_rate}/hr</span>
+                        </div>
+                      )}
 
                       {/* Unbudgeted High-Risk Alert Callout */}
                       {defenderPlan.unbudgeted_high_risk_findings.length > 0 && (
@@ -1145,7 +1263,7 @@ export function AgentSimulationView() {
                             <span>Unbudgeted High-Risk Exposures Detected!</span>
                           </div>
                           <p className="text-[11px] leading-relaxed">
-                            {defenderPlan.unbudgeted_high_risk_findings.length} critical/high issue(s) cannot be fully resolved within your ${defenderPlan.available_budget.toLocaleString()} budget. An additional <strong>${defenderPlan.budget_shortfall.toLocaleString()}</strong> is required to fund complete perimeter hardening.
+                            {defenderPlan.unbudgeted_high_risk_findings.length} critical/high issue(s) cannot be fully resolved within your {defenderPlan.currency || currency} {defenderPlan.available_budget.toLocaleString()} budget. An additional <strong>{defenderPlan.currency || currency} {defenderPlan.budget_shortfall.toLocaleString()}</strong> is required to fund complete perimeter hardening.
                           </p>
                         </div>
                       )}
@@ -1273,6 +1391,29 @@ export function AgentSimulationView() {
                   </CardHeader>
 
                   <CardContent className="space-y-4">
+                    {/* Inconclusive Scan / Retry Notice */}
+                    {scanResult.is_inconclusive && (
+                      <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-3.5 text-xs text-blue-200 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold text-blue-300 flex items-center gap-1.5">
+                            <AlertTriangle className="size-4 text-blue-400" /> Scan Inconclusive (Gateway / Network Error)
+                          </p>
+                          {scanResult.allows_retry && (
+                            <button
+                              type="button"
+                              onClick={handleStartRealScan}
+                              className="inline-flex items-center gap-1.5 rounded bg-blue-600/30 px-2.5 py-1 text-[11px] font-semibold text-blue-100 border border-blue-500/40 hover:bg-blue-600/50 transition-colors"
+                            >
+                              <RotateCcw className="size-3" /> Retry Assessment
+                            </button>
+                          )}
+                        </div>
+                        <p className="leading-relaxed text-blue-300/90">
+                          The target scan encountered an upstream proxy, edge tunnel failure, or network connection error. Missing security headers were not reported as confirmed findings from this error response.
+                        </p>
+                      </div>
+                    )}
+
                     {/* Zero Findings Honesty Disclaimer */}
                     {scanResult.zero_findings_disclaimer && (
                       <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 space-y-1">
@@ -1312,8 +1453,8 @@ export function AgentSimulationView() {
                               </div>
 
                               <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-muted-foreground font-mono">
-                                  {finding.validation_status}
+                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold ${getValidationBadgeClass(finding.evidence?.check_result || finding.validation_status)}`}>
+                                  {finding.evidence?.check_result || finding.validation_status}
                                 </span>
                                 <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold font-mono ${getStatusBadgeClass(finding.remediation_status)}`}>
                                   {finding.remediation_status}
@@ -1355,13 +1496,64 @@ export function AgentSimulationView() {
                             </div>
 
                             {isExpanded && (
-                              <div className="rounded-md bg-background/80 border p-2.5 font-mono text-[11px] space-y-1 text-foreground/90 overflow-x-auto">
-                                <p className="text-muted-foreground">// Check Type: {finding.evidence.check_type}</p>
-                                {finding.evidence.raw_snippet && (
-                                  <p className="text-emerald-400">{finding.evidence.raw_snippet}</p>
+                              <div className="rounded-md bg-background/80 border p-3 font-mono text-[11px] space-y-2 text-foreground/90 overflow-x-auto">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pb-2 border-b border-border/40 text-[10px]">
+                                  <div>
+                                    <span className="text-muted-foreground">Check Type: </span>
+                                    <span className="text-foreground">{finding.evidence.check_type}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-muted-foreground">HTTP Status: </span>
+                                    <span className="text-foreground">{finding.evidence.status_code ?? "N/A"}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-muted-foreground">Target URL: </span>
+                                    <span className="text-foreground break-all">{finding.evidence.requested_url || finding.affected_url_or_component}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-muted-foreground">Final URL: </span>
+                                    <span className="text-foreground break-all">{finding.evidence.final_url || finding.affected_url_or_component}</span>
+                                  </div>
+                                </div>
+
+                                {finding.evidence.check_result && (
+                                  <div>
+                                    <span className="text-muted-foreground">Check Result: </span>
+                                    <span className="font-semibold text-foreground">{finding.evidence.check_result}</span>
+                                    {finding.evidence.is_inferred && (
+                                      <span className="ml-2 text-amber-400 text-[10px]">(Inferred Risk)</span>
+                                    )}
+                                  </div>
                                 )}
-                                {finding.evidence.status_code && (
-                                  <p className="text-muted-foreground">HTTP Status: {finding.evidence.status_code}</p>
+
+                                {finding.evidence.confidence_reason && (
+                                  <div>
+                                    <span className="text-muted-foreground">Confidence ({finding.confidence}): </span>
+                                    <span className="text-foreground/90">{finding.evidence.confidence_reason}</span>
+                                  </div>
+                                )}
+
+                                {finding.evidence.observed_headers && Object.keys(finding.evidence.observed_headers).length > 0 && (
+                                  <div>
+                                    <p className="text-muted-foreground mb-1">// Observed Relevant Headers:</p>
+                                    <div className="bg-muted/30 rounded p-1.5 border border-border/30 space-y-0.5 text-[10px]">
+                                      {Object.entries(finding.evidence.observed_headers).map(([k, v]) => (
+                                        <div key={k} className="flex gap-2">
+                                          <span className="text-primary font-bold">{k}:</span>
+                                          <span className="text-foreground/80 break-all">{v}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {finding.evidence.raw_snippet && (
+                                  <div>
+                                    <p className="text-muted-foreground mb-0.5">// Raw Wire Snippet:</p>
+                                    <p className="text-emerald-400 bg-emerald-950/20 rounded p-1.5 border border-emerald-500/20 break-all">
+                                      {finding.evidence.raw_snippet}
+                                    </p>
+                                  </div>
                                 )}
                               </div>
                             )}
@@ -1473,11 +1665,14 @@ export function AgentSimulationView() {
                                   </div>
 
                                   <div className="flex items-center gap-3 text-xs font-mono">
+                                    <span className="rounded bg-muted/60 px-2 py-0.5 text-[10px] text-muted-foreground">
+                                      Diff: <strong className="text-foreground">{item.implementation_difficulty || "Moderate"}</strong>
+                                    </span>
                                     <span className="text-muted-foreground">
                                       Effort: <strong>{item.estimated_effort_hours}h</strong>
                                     </span>
                                     <span className="text-foreground font-bold">
-                                      Cost: ${item.total_cost.toLocaleString()}
+                                      Cost: {item.currency || currency} {item.total_cost.toLocaleString()}
                                     </span>
                                     <span className="text-emerald-400 font-bold">
                                       -{item.projected_risk_reduction} pts
@@ -1485,20 +1680,46 @@ export function AgentSimulationView() {
                                   </div>
                                 </div>
 
-                                {/* Root Cause & Actionable Fix */}
+                                {/* Priority Explanation & Target Location */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                                  {item.priority_score !== undefined && (
+                                    <div className="rounded-md border bg-muted/20 p-2 space-y-0.5 font-mono text-[11px]">
+                                      <div className="flex items-center justify-between text-muted-foreground">
+                                        <span>Prioritization Score:</span>
+                                        <strong className="text-foreground font-bold">{item.priority_score.toFixed(1)} / 100</strong>
+                                      </div>
+                                      <p className="text-[10px] text-muted-foreground font-sans">
+                                        {item.priority_explanation || "Ranked by validated severity, confidence, internet exposure, and effort ROI."}
+                                      </p>
+                                    </div>
+                                  )}
+
+                                  <div className="rounded-md border bg-muted/20 p-2 space-y-0.5 font-mono text-[11px]">
+                                    <div className="text-muted-foreground">Target File / Config Location:</div>
+                                    <div className="text-foreground font-semibold text-[11px] truncate">
+                                      {item.file_or_config_location || "Web server / reverse proxy configuration"}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Why It Matters & Actionable Fix */}
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                                   <div className="space-y-1">
                                     <p className="font-semibold text-foreground flex items-center gap-1.5">
-                                      <AlertTriangle className="size-3.5 text-amber-400" /> Root Cause
+                                      <AlertTriangle className="size-3.5 text-amber-400" /> Why It Matters
                                     </p>
-                                    <p className="text-muted-foreground leading-relaxed">{item.root_cause}</p>
+                                    <p className="text-muted-foreground leading-relaxed">
+                                      {item.why_it_matters || item.root_cause}
+                                    </p>
                                   </div>
 
                                   <div className="space-y-1">
                                     <p className="font-semibold text-foreground flex items-center gap-1.5">
                                       <CheckCircle2 className="size-3.5 text-emerald-400" /> Actionable Fix
                                     </p>
-                                    <p className="text-muted-foreground leading-relaxed">{item.actionable_fix}</p>
+                                    <p className="text-muted-foreground leading-relaxed">
+                                      {item.recommended_fix || item.actionable_fix}
+                                    </p>
                                   </div>
                                 </div>
 
@@ -1535,6 +1756,28 @@ export function AgentSimulationView() {
                                   </div>
                                 )}
 
+                                {/* Dependencies, Side Effects & Rollback Guidance */}
+                                {(item.dependencies_and_side_effects || item.rollback_guidance) && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                                    {item.dependencies_and_side_effects && (
+                                      <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-2 space-y-0.5 text-amber-300">
+                                        <span className="font-semibold block text-[10px] uppercase tracking-wider text-amber-400">
+                                          Side Effects & Dependencies:
+                                        </span>
+                                        <p className="text-muted-foreground leading-normal">{item.dependencies_and_side_effects}</p>
+                                      </div>
+                                    )}
+                                    {item.rollback_guidance && (
+                                      <div className="rounded-md border border-muted bg-muted/20 p-2 space-y-0.5 text-muted-foreground">
+                                        <span className="font-semibold block text-[10px] uppercase tracking-wider text-foreground">
+                                          Rollback Guidance:
+                                        </span>
+                                        <p className="leading-normal">{item.rollback_guidance}</p>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
                                 {/* Deferral Explanation & Temporary Mitigation */}
                                 {item.priority_group === "defer_or_mitigate" && (
                                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-300 space-y-1">
@@ -1547,36 +1790,95 @@ export function AgentSimulationView() {
                                   </div>
                                 )}
 
-                                {/* Verification Command */}
-                                <div className="rounded-md border bg-muted/30 p-2.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                                  <div className="flex items-center gap-2 text-muted-foreground">
-                                    <Terminal className="size-3.5 text-primary shrink-0" />
-                                    <span className="font-semibold text-foreground text-[11px]">Recommended Verification:</span>
-                                    <code className="rounded bg-black/40 px-2 py-0.5 text-[10px] text-emerald-400 font-mono">
-                                      {item.verification_procedure}
-                                    </code>
+                                {/* Verification Command, Live Re-check & 5-Stage Status Lifecycle */}
+                                <div className="rounded-md border bg-muted/30 p-2.5 text-xs flex flex-col gap-2.5">
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 text-muted-foreground">
+                                      <Terminal className="size-3.5 text-primary shrink-0" />
+                                      <span className="font-semibold text-foreground text-[11px]">Recommended Verification:</span>
+                                      <code className="rounded bg-black/40 px-2 py-0.5 text-[10px] text-emerald-400 font-mono">
+                                        {item.verification_procedure}
+                                      </code>
+                                    </div>
+
+                                    {/* Action Controls: Live Verification Button & Status Lifecycle Selector */}
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => handleVerifyRemediation(item.finding_id)}
+                                        disabled={isVerifying[item.finding_id] || !scanResult}
+                                        className="h-7 text-xs font-mono font-medium border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+                                      >
+                                        {isVerifying[item.finding_id] ? (
+                                          <>
+                                            <Loader2 className="mr-1 size-3 animate-spin" /> Verifying…
+                                          </>
+                                        ) : (
+                                          <>
+                                            <ShieldCheck className="mr-1 size-3.5" /> Re-check Wire Fix
+                                          </>
+                                        )}
+                                      </Button>
+
+                                      <div className="flex items-center gap-1.5">
+                                        <label className="text-[11px] text-muted-foreground font-mono">Status:</label>
+                                        <select
+                                          value={item.status}
+                                          onChange={(e) => handleUpdateRemediationStatus(item.finding_id, e.target.value)}
+                                          disabled={statusUpdating[item.finding_id] || isVerifying[item.finding_id]}
+                                          className={`h-7 rounded border bg-background px-2 text-xs font-mono font-semibold ${
+                                            item.status === "Verified Fixed" || item.status === "Verified"
+                                              ? "border-emerald-500 text-emerald-400"
+                                              : item.status === "Fixed Pending Verification"
+                                              ? "border-amber-500 text-amber-300"
+                                              : item.status === "Reopened"
+                                              ? "border-rose-500 text-rose-400"
+                                              : "border-input text-foreground"
+                                          }`}
+                                        >
+                                          <option value="Not Started">Not Started</option>
+                                          <option value="In Progress">In Progress</option>
+                                          <option value="Fixed Pending Verification">Fixed Pending Verification</option>
+                                          <option value="Verified Fixed">Verified Fixed</option>
+                                          <option value="Reopened">Reopened</option>
+                                        </select>
+                                        {statusUpdating[item.finding_id] && (
+                                          <Loader2 className="size-3 animate-spin text-primary" />
+                                        )}
+                                      </div>
+                                    </div>
                                   </div>
 
-                                  {/* Interactive Remediation Status Selector */}
-                                  <div className="flex items-center gap-2">
-                                    <label className="text-[11px] text-muted-foreground font-mono">Status:</label>
-                                    <select
-                                      value={item.status}
-                                      onChange={(e) => handleUpdateRemediationStatus(item.finding_id, e.target.value)}
-                                      disabled={statusUpdating[item.finding_id]}
-                                      className="h-7 rounded border border-input bg-background px-2 text-xs text-foreground outline-none font-mono"
+                                  {/* Verification Feedback Banner */}
+                                  {verificationFeedback[item.finding_id] && (
+                                    <div
+                                      className={`rounded-md border p-2 text-xs space-y-1 ${
+                                        verificationFeedback[item.finding_id].success
+                                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                                          : verificationFeedback[item.finding_id].is_inconclusive
+                                          ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                                          : "border-rose-500/40 bg-rose-500/10 text-rose-300"
+                                      }`}
                                     >
-                                      <option value="Open">Open</option>
-                                      <option value="Planned">Planned</option>
-                                      <option value="In Progress">In Progress</option>
-                                      <option value="Fixed">Fixed</option>
-                                      <option value="Accepted Risk">Accepted Risk</option>
-                                      <option value="Verified">Verified</option>
-                                    </select>
-                                    {statusUpdating[item.finding_id] && (
-                                      <Loader2 className="size-3 animate-spin text-primary" />
-                                    )}
-                                  </div>
+                                      <div className="flex items-center gap-1.5 font-bold font-mono">
+                                        {verificationFeedback[item.finding_id].success ? (
+                                          <CheckCircle2 className="size-3.5 text-emerald-400 shrink-0" />
+                                        ) : verificationFeedback[item.finding_id].is_inconclusive ? (
+                                          <AlertTriangle className="size-3.5 text-amber-400 shrink-0" />
+                                        ) : (
+                                          <XCircle className="size-3.5 text-rose-400 shrink-0" />
+                                        )}
+                                        <span>
+                                          Verification Outcome: {verificationFeedback[item.finding_id].new_status}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] leading-relaxed">
+                                        {verificationFeedback[item.finding_id].message}
+                                      </p>
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             ))}

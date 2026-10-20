@@ -121,6 +121,27 @@ def init_db():
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS remediation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id TEXT NOT NULL,
+                    finding_id TEXT NOT NULL,
+                    old_status TEXT NOT NULL,
+                    new_status TEXT NOT NULL,
+                    evidence_json TEXT,
+                    notes TEXT,
+                    changed_at TEXT NOT NULL,
+                    FOREIGN KEY (scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE
+                )
+                """
+            )
+            # Add verification_evidence_json column if missing in findings table
+            try:
+                conn.execute("ALTER TABLE findings ADD COLUMN verification_evidence_json TEXT")
+            except Exception:
+                pass  # already exists
+
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id)"
             )
             conn.execute(
@@ -128,6 +149,22 @@ def init_db():
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pages_scan_id ON discovered_pages(scan_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rem_history ON remediation_history(scan_id, finding_id)"
+            )
+
+            # Reliability & restart resilience: Mark any stranded in-progress or queued scans as failed
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE scans
+                SET status = 'failed',
+                    scope_limitations = scope_limitations || ' [Server process restarted while scan was active]',
+                    updated_at = ?
+                WHERE status IN ('running', 'queued')
+                """,
+                (now_iso,),
             )
     finally:
         conn.close()
@@ -210,10 +247,27 @@ def save_scan_record(scan_data: Dict[str, Any]) -> None:
                             json.dumps(f.get("references", [])),
                             1 if f.get("is_confirmed", True) else 0,
                             f.get("validation_status", "Confirmed Observation"),
-                            f.get("remediation_status", "Open"),
+                            f.get("remediation_status") or "Open",
                             f.get("remediation_notes", ""),
                             now,
                             now,
+                        ),
+                    )
+                else:
+                    # Update evidence while preserving user remediation lifecycle status
+                    conn.execute(
+                        """
+                        UPDATE findings SET
+                            evidence_json = ?,
+                            validation_status = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            json.dumps(f.get("evidence", {})),
+                            f.get("validation_status", "Confirmed Observation"),
+                            now,
+                            existing["id"],
                         ),
                     )
     finally:
@@ -267,6 +321,7 @@ def get_scan_record(scan_id: str) -> Optional[Dict[str, Any]]:
                 "validation_status": fr["validation_status"],
                 "remediation_status": fr["remediation_status"],
                 "remediation_notes": fr["remediation_notes"],
+                "verification_evidence": json.loads(fr["verification_evidence_json"] or "{}") if "verification_evidence_json" in fr.keys() and fr["verification_evidence_json"] else None,
             })
 
         return {
@@ -371,13 +426,35 @@ def get_discovered_pages(scan_id: str) -> List[Dict[str, Any]]:
 
 
 def update_finding_remediation_status(
-    scan_id: str, finding_id: str, status: str, notes: Optional[str] = None
+    scan_id: str,
+    finding_id: str,
+    status: str,
+    notes: Optional[str] = None,
+    verification_evidence: Optional[Dict[str, Any]] = None,
 ) -> bool:
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     conn = get_db_connection()
     try:
         with conn:
-            if notes is not None:
+            # Query existing status for history logging
+            old_row = conn.execute(
+                "SELECT remediation_status FROM findings WHERE scan_id = ? AND finding_id = ?",
+                (scan_id, finding_id),
+            ).fetchone()
+            old_status = old_row["remediation_status"] if old_row else "Not Started"
+
+            evidence_str = json.dumps(verification_evidence) if verification_evidence is not None else None
+
+            if notes is not None and evidence_str is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE findings
+                    SET remediation_status = ?, remediation_notes = ?, verification_evidence_json = ?, updated_at = ?
+                    WHERE scan_id = ? AND finding_id = ?
+                    """,
+                    (status, notes, evidence_str, now, scan_id, finding_id),
+                )
+            elif notes is not None:
                 cur = conn.execute(
                     """
                     UPDATE findings
@@ -385,6 +462,15 @@ def update_finding_remediation_status(
                     WHERE scan_id = ? AND finding_id = ?
                     """,
                     (status, notes, now, scan_id, finding_id),
+                )
+            elif evidence_str is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE findings
+                    SET remediation_status = ?, verification_evidence_json = ?, updated_at = ?
+                    WHERE scan_id = ? AND finding_id = ?
+                    """,
+                    (status, evidence_str, now, scan_id, finding_id),
                 )
             else:
                 cur = conn.execute(
@@ -395,7 +481,49 @@ def update_finding_remediation_status(
                     """,
                     (status, now, scan_id, finding_id),
                 )
+
+            # Record in remediation history audit log
+            if cur.rowcount > 0:
+                conn.execute(
+                    """
+                    INSERT INTO remediation_history (
+                        scan_id, finding_id, old_status, new_status, evidence_json, notes, changed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (scan_id, finding_id, old_status, status, evidence_str, notes or "", now),
+                )
+
             return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_remediation_history(scan_id: str, finding_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    try:
+        if finding_id:
+            rows = conn.execute(
+                "SELECT * FROM remediation_history WHERE scan_id = ? AND finding_id = ? ORDER BY id DESC",
+                (scan_id, finding_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM remediation_history WHERE scan_id = ? ORDER BY id DESC",
+                (scan_id,),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "scan_id": r["scan_id"],
+                "finding_id": r["finding_id"],
+                "old_status": r["old_status"],
+                "new_status": r["new_status"],
+                "evidence": json.loads(r["evidence_json"] or "{}") if r["evidence_json"] else None,
+                "notes": r["notes"],
+                "changed_at": r["changed_at"],
+            }
+            for r in rows
+        ]
     finally:
         conn.close()
 
@@ -470,22 +598,35 @@ def get_latest_remediation_plan(scan_id: str) -> Optional[Dict[str, Any]]:
         if not row:
             return None
 
-        # Fetch current remediation statuses from findings
+        # Fetch current remediation statuses and verification evidence from findings
         findings_rows = conn.execute(
-            "SELECT finding_id, remediation_status FROM findings WHERE scan_id = ?",
+            "SELECT finding_id, remediation_status, remediation_notes, verification_evidence_json FROM findings WHERE scan_id = ?",
             (scan_id,),
         ).fetchall()
-        status_map = {fr["finding_id"]: fr["remediation_status"] for fr in findings_rows}
+        status_map = {
+            fr["finding_id"]: {
+                "status": fr["remediation_status"],
+                "notes": fr["remediation_notes"],
+                "evidence": json.loads(fr["verification_evidence_json"] or "{}") if "verification_evidence_json" in fr.keys() and fr["verification_evidence_json"] else None
+            }
+            for fr in findings_rows
+        }
 
         fix_imm = json.loads(row["fix_immediately_json"] or "[]")
         fix_nxt = json.loads(row["fix_next_json"] or "[]")
         defer = json.loads(row["defer_or_mitigate_json"] or "[]")
         unbudgeted = json.loads(row["unbudgeted_high_risk_json"] or "[]")
 
-        # Overlay updated statuses
+        # Overlay updated statuses and evidence
         for item in fix_imm + fix_nxt + defer + unbudgeted:
-            if item.get("finding_id") in status_map:
-                item["status"] = status_map[item["finding_id"]]
+            f_id = item.get("finding_id")
+            if f_id in status_map:
+                item["status"] = status_map[f_id]["status"]
+                item["remediation_status"] = status_map[f_id]["status"]
+                if status_map[f_id]["notes"]:
+                    item["status_notes"] = status_map[f_id]["notes"]
+                if status_map[f_id]["evidence"]:
+                    item["verification_evidence"] = status_map[f_id]["evidence"]
 
         return {
             "plan_id": row["plan_id"],

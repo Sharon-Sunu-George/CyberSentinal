@@ -34,8 +34,39 @@ MAX_REDIRECT_HOPS = 2
 USER_AGENT = "CyberSentinal-Security-Auditor/2.0 (+https://cybersentinel.ai/scanner-policy)"
 
 
+def detect_proxy_or_tunnel_error(status_code: int, headers: Dict[str, str], body_text: str = "") -> Tuple[bool, Optional[str]]:
+    """
+    Determines if an HTTP response originates from an intermediary proxy,
+    tunnel, or edge gateway error rather than the target web application.
+    Identifies Cloudflare, Ngrok, AWS ALB/CloudFront, Nginx/HAProxy reverse proxies.
+    """
+    lower_headers = {k.lower(): v.lower() for k, v in headers.items()}
+    server = lower_headers.get("server", "")
+    body_lower = body_text.lower()[:4096]
+
+    # Status codes indicating gateway/reverse proxy failure
+    if status_code in (502, 503, 504, 520, 521, 522, 524):
+        if "cloudflare" in server or "cf-ray" in lower_headers:
+            return True, f"Cloudflare Gateway Error (HTTP {status_code})"
+        if "ngrok-error-code" in lower_headers or "ngrok" in body_lower:
+            return True, f"Ngrok Tunnel Error (HTTP {status_code})"
+        if "awselb" in server or "x-amz-cf-id" in lower_headers or "cloudfront" in body_lower:
+            return True, f"AWS Gateway / CloudFront Error (HTTP {status_code})"
+        if "nginx" in server:
+            return True, f"Nginx Reverse Proxy Bad Gateway / Error (HTTP {status_code})"
+        return True, f"Upstream Proxy / Gateway Error (HTTP {status_code})"
+
+    # Tunnel error pages returning 404 or other codes with specific proxy signatures
+    if "ngrok-error-code" in lower_headers or "tunnel " in body_lower and "not found" in body_lower:
+        return True, "Ngrok Tunnel Inactive or Not Found"
+    if "cf-ray" in lower_headers and ("error 52" in body_lower or "web server is down" in body_lower):
+        return True, "Cloudflare Host Unreachable"
+
+    return False, None
+
+
 class SafeHttpResponse:
-    """Encapsulates response data from a safe HTTP probe."""
+    """Encapsulates response data from a safe HTTP probe with origin verification."""
     def __init__(
         self,
         url: str,
@@ -44,6 +75,12 @@ class SafeHttpResponse:
         body_text: str,
         remote_ip: str,
         was_https: bool,
+        requested_url: Optional[str] = None,
+        final_url: Optional[str] = None,
+        redirect_chain: Optional[List[Dict[str, Any]]] = None,
+        response_timestamp: Optional[str] = None,
+        is_proxy_or_tunnel_error: Optional[bool] = None,
+        proxy_or_tunnel_type: Optional[str] = None,
     ):
         self.url = url
         self.status_code = status_code
@@ -51,6 +88,18 @@ class SafeHttpResponse:
         self.body_text = body_text
         self.remote_ip = remote_ip
         self.was_https = was_https
+        self.requested_url = requested_url or url
+        self.final_url = final_url or url
+        self.redirect_chain = redirect_chain or []
+        self.response_timestamp = response_timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        if is_proxy_or_tunnel_error is None:
+            detected, p_type = detect_proxy_or_tunnel_error(status_code, headers, body_text)
+            self.is_proxy_or_tunnel_error = detected
+            self.proxy_or_tunnel_type = p_type
+        else:
+            self.is_proxy_or_tunnel_error = is_proxy_or_tunnel_error
+            self.proxy_or_tunnel_type = proxy_or_tunnel_type
 
     def get_header(self, name: str) -> Optional[str]:
         for k, v in self.headers.items():
@@ -83,9 +132,14 @@ class SafeHttpClient:
         allowed_origin_host: Optional[str] = None,
         allowed_origin_port: Optional[int] = None,
         redirect_depth: int = 0,
+        initial_requested_url: Optional[str] = None,
+        redirect_chain: Optional[List[Dict[str, Any]]] = None,
     ) -> SafeHttpResponse:
         if redirect_depth > MAX_REDIRECT_HOPS:
             raise SSRFProtectionError(f"Exceeded maximum redirect limit ({MAX_REDIRECT_HOPS}).")
+
+        req_origin_url = initial_requested_url or url
+        chain = list(redirect_chain) if redirect_chain else []
 
         normalized_url, hostname, port, path = normalize_target_url(url)
         current_scheme = "https" if normalized_url.startswith("https://") else "http"
@@ -178,6 +232,11 @@ class SafeHttpClient:
 
                 if location:
                     next_url = urllib.parse.urljoin(normalized_url, location)
+                    chain.append({
+                        "from_url": normalized_url,
+                        "to_url": next_url,
+                        "status_code": status_code,
+                    })
                     return self.request(
                         url=next_url,
                         method="GET",
@@ -185,8 +244,11 @@ class SafeHttpClient:
                         allowed_origin_host=target_host,
                         allowed_origin_port=target_port,
                         redirect_depth=redirect_depth + 1,
+                        initial_requested_url=req_origin_url,
+                        redirect_chain=chain,
                     )
 
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             return SafeHttpResponse(
                 url=normalized_url,
                 status_code=status_code,
@@ -194,6 +256,10 @@ class SafeHttpClient:
                 body_text=body_text,
                 remote_ip=verified_ip,
                 was_https=is_https,
+                requested_url=req_origin_url,
+                final_url=normalized_url,
+                redirect_chain=chain,
+                response_timestamp=now_iso,
             )
         finally:
             if raw_sock:
@@ -281,6 +347,8 @@ class EvidenceBasedScanner:
             "target_ip": None,
             "scanned_at": now,
             "scanner_name": self.scanner_name,
+            "is_inconclusive": False,
+            "allows_retry": False,
             "scanner_info": {
                 "engine": self.scanner_name,
                 "mode": "passive-safe",
@@ -314,10 +382,91 @@ class EvidenceBasedScanner:
             main_resp = self.client.request(normalized_url, allowed_origin_host=hostname)
             scan_meta["target_ip"] = main_resp.remote_ip
             scan_meta["status_code"] = main_resp.status_code
+            scan_meta["final_url"] = main_resp.final_url
+            scan_meta["requested_url"] = main_resp.requested_url
         except Exception as e:
             scan_meta["error"] = str(e)
-            raise
+            scan_meta["is_inconclusive"] = True
+            scan_meta["allows_retry"] = True
+            # Connection or network failure finding
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-SCAN-CONNECTION-FAILED",
+                    title="Target Connection Failed / Inaccessible",
+                    category="Transport Security",
+                    severity="Low",
+                    confidence="High",
+                    affected_url_or_component=target_url,
+                    evidence=FindingEvidence(
+                        check_type="connection_probe",
+                        observed_data={"error": str(e), "target_url": target_url},
+                        raw_snippet=f"Failed to establish network connection to target: {str(e)}",
+                        status_code=None,
+                        requested_url=target_url,
+                        final_url=target_url,
+                        observed_headers={},
+                        check_result="Scan error",
+                        confidence_reason="Direct TCP connection, TLS handshake, or socket timeout error prevented receiving HTTP response.",
+                        is_inferred=False,
+                        response_timestamp=now,
+                    ),
+                    potential_impact="Security assessment could not complete because the target host is unreachable, down, or rejecting incoming TCP connections.",
+                    remediation="Verify target host availability, firewall configuration, DNS records, and retry the assessment.",
+                    cwe_id=None,
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=now,
+                    references=[],
+                    is_confirmed=True,
+                    validation_status="Scan error",
+                )
+            )
+            return findings, scan_meta
 
+        # Check for proxy / tunnel error or 502/503/504 gateway responses
+        if main_resp.is_proxy_or_tunnel_error or main_resp.status_code in (502, 503, 504, 520, 521, 522, 524):
+            scan_meta["is_inconclusive"] = True
+            scan_meta["allows_retry"] = True
+            reason_label = main_resp.proxy_or_tunnel_type or f"Gateway Error (HTTP {main_resp.status_code})"
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-SCAN-GATEWAY-PROXY-ERROR",
+                    title=f"Scan Inconclusive: Upstream {reason_label}",
+                    category="Transport Security",
+                    severity="Low",
+                    confidence="High",
+                    affected_url_or_component=main_resp.final_url,
+                    evidence=FindingEvidence(
+                        check_type="proxy_gateway_check",
+                        observed_data={
+                            "status_code": main_resp.status_code,
+                            "proxy_or_tunnel_type": main_resp.proxy_or_tunnel_type,
+                            "server": main_resp.get_header("Server") or "unknown",
+                        },
+                        raw_snippet=f"HTTP {main_resp.status_code} received from intermediate gateway: {reason_label}. Application response was not reached.",
+                        status_code=main_resp.status_code,
+                        requested_url=main_resp.requested_url,
+                        final_url=main_resp.final_url,
+                        observed_headers={k: v for k, v in main_resp.headers.items() if k.lower() in ("server", "cf-ray", "via", "x-cache", "ngrok-error-code")},
+                        check_result="Inconclusive",
+                        confidence_reason="HTTP response originated from an intermediate reverse proxy or edge tunnel failure. Application security headers cannot be verified from a gateway error page.",
+                        is_inferred=False,
+                        response_timestamp=main_resp.response_timestamp,
+                    ),
+                    potential_impact="The target web server is offline, unhealthy, or rejecting connections from the edge proxy. Target security headers cannot be accurately assessed.",
+                    remediation="Ensure upstream web service is running and accessible to the edge proxy/tunnel, then retry the assessment.",
+                    cwe_id=None,
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=now,
+                    references=[],
+                    is_confirmed=True,
+                    validation_status="Inconclusive",
+                )
+            )
+            return findings, scan_meta
+
+        # Execute standard checks against valid application responses
         # Check 1: HTTPS & Transport Security
         self._check_transport_security(main_resp, findings, now)
 
@@ -368,13 +517,20 @@ class EvidenceBasedScanner:
                         observed_data={"scheme": "http", "status": resp.status_code},
                         raw_snippet=f"Target URL is served over unencrypted HTTP: {resp.url}",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={},
+                        check_result="Confirmed observation",
+                        confidence_reason="Observed connection protocol is plain unencrypted HTTP. All network traffic is sent in cleartext.",
+                        is_inferred=False,
+                        response_timestamp=resp.response_timestamp,
                     ),
                     potential_impact="Network eavesdroppers and man-in-the-middle attackers can intercept or modify transmitted credentials, session cookies, and sensitive payloads.",
                     remediation="Migrate site to HTTPS, redirect all HTTP port 80 traffic to HTTPS port 443, and configure HSTS.",
                     cwe_id="CWE-319",
                     cve_id=None,
                     scanner_name=self.scanner_name,
-                    scanned_at=now,
+                    scanned_at=ts,
                     references=[
                         "https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure",
                         "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html",
@@ -384,6 +540,7 @@ class EvidenceBasedScanner:
                 )
             )
         else:
+            # HSTS is evaluated ONLY on HTTPS connections per RFC 6797 Section 7.2
             hsts = resp.get_header("Strict-Transport-Security")
             if not hsts:
                 findings.append(
@@ -396,16 +553,23 @@ class EvidenceBasedScanner:
                         affected_url_or_component=resp.url,
                         evidence=FindingEvidence(
                             check_type="security_headers",
-                            observed_data={"missing_header": "Strict-Transport-Security"},
+                            observed_data={"missing_header": "Strict-Transport-Security", "scheme": "https"},
                             raw_snippet="Response headers do not include 'Strict-Transport-Security'.",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={k: v for k, v in resp.headers.items() if "transport" in k.lower() or "strict" in k.lower()},
+                            check_result="Potential risk",
+                            confidence_reason="Evaluated on a secure HTTPS response. Strict-Transport-Security header is completely absent, allowing SSL-stripping downgrades.",
+                            is_inferred=True,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact="Users connecting over insecure networks can be downgraded to unencrypted HTTP via SSL-stripping attacks on subsequent visits.",
                         remediation="Configure 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' in web server configuration.",
                         cwe_id="CWE-319",
                         cve_id=None,
                         scanner_name=self.scanner_name,
-                        scanned_at=now,
+                        scanned_at=ts,
                         references=[
                             "https://datatracker.ietf.org/doc/html/rfc6797",
                             "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html",
@@ -430,15 +594,22 @@ class EvidenceBasedScanner:
                     evidence=FindingEvidence(
                         check_type="security_headers",
                         observed_data={"missing_header": "Content-Security-Policy"},
-                        raw_snippet="Response header 'Content-Security-Policy' is absent.",
+                        raw_snippet="Response header 'Content-Security-Policy' is absent from the target HTTP response.",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={},
+                        check_result="Potential risk",
+                        confidence_reason="Finding is based solely on the absence of the Content-Security-Policy header in observed headers. No direct script injection was tested.",
+                        is_inferred=True,
+                        response_timestamp=resp.response_timestamp,
                     ),
-                    potential_impact="Increases susceptibility to Cross-Site Scripting (XSS), clickjacking, and unauthorized inline script or data injection.",
+                    potential_impact="Increases susceptibility to Cross-Site Scripting (XSS), unauthorized inline script execution, and untrusted asset loading.",
                     remediation="Define a restrictive Content Security Policy (e.g., default-src 'self'; script-src 'self'; object-src 'none').",
                     cwe_id="CWE-693",
                     cve_id=None,
                     scanner_name=self.scanner_name,
-                    scanned_at=now,
+                    scanned_at=ts,
                     references=[
                         "https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP",
                         "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
@@ -449,7 +620,7 @@ class EvidenceBasedScanner:
             )
 
         xcto = resp.get_header("X-Content-Type-Options")
-        if not xcto or "nosniff" not in xcto.lower():
+        if not xcto:
             findings.append(
                 VulnerabilityFinding(
                     id="VULN-SEC-HDR-NO-NOSNIFF",
@@ -460,16 +631,58 @@ class EvidenceBasedScanner:
                     affected_url_or_component=resp.url,
                     evidence=FindingEvidence(
                         check_type="security_headers",
-                        observed_data={"header_value": xcto or "absent"},
-                        raw_snippet=f"X-Content-Type-Options is {xcto or 'missing'}",
+                        observed_data={"header_value": "absent"},
+                        raw_snippet="Response header 'X-Content-Type-Options' is absent.",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={},
+                        check_result="Potential risk",
+                        confidence_reason="X-Content-Type-Options is missing entirely; browser may sniff MIME types away from declared Content-Type.",
+                        is_inferred=True,
+                        response_timestamp=resp.response_timestamp,
                     ),
                     potential_impact="Browsers may MIME-sniff response bodies away from the declared Content-Type, potentially executing non-executable files as JavaScript or HTML.",
                     remediation="Add 'X-Content-Type-Options: nosniff' to web server response headers.",
                     cwe_id="CWE-693",
                     cve_id=None,
                     scanner_name=self.scanner_name,
-                    scanned_at=now,
+                    scanned_at=ts,
+                    references=[
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
+                    ],
+                    is_confirmed=True,
+                    validation_status="Security Weakness",
+                )
+            )
+        elif "nosniff" not in xcto.lower():
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-SEC-HDR-INVALID-NOSNIFF",
+                    title="Invalid X-Content-Type-Options Header Value",
+                    category="Security Headers",
+                    severity="Low",
+                    confidence="High",
+                    affected_url_or_component=resp.url,
+                    evidence=FindingEvidence(
+                        check_type="security_headers",
+                        observed_data={"header_value": xcto},
+                        raw_snippet=f"Observed X-Content-Type-Options: '{xcto}' (expected 'nosniff')",
+                        status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={"x-content-type-options": xcto},
+                        check_result="Confirmed observation",
+                        confidence_reason=f"Header is present with value '{xcto}', which does not contain the mandatory 'nosniff' directive.",
+                        is_inferred=False,
+                        response_timestamp=resp.response_timestamp,
+                    ),
+                    potential_impact="Browsers will ignore invalid X-Content-Type-Options values and continue MIME-sniffing payloads.",
+                    remediation="Change 'X-Content-Type-Options' value to exactly 'nosniff'.",
+                    cwe_id="CWE-693",
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=ts,
                     references=[
                         "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
                     ],
@@ -490,6 +703,7 @@ class EvidenceBasedScanner:
                         has_effective_frame_ancestors = True
                     break
 
+        # Clickjacking is considered mitigated if EITHER effective XFO OR CSP frame-ancestors is present
         if not has_effective_xfo and not has_effective_frame_ancestors:
             findings.append(
                 VulnerabilityFinding(
@@ -512,13 +726,23 @@ class EvidenceBasedScanner:
                             f"CSP frame-ancestors: {'configured' if has_effective_frame_ancestors else 'absent/ineffective'}"
                         ),
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={
+                            k: v for k, v in resp.headers.items()
+                            if k.lower() in ("x-frame-options", "content-security-policy")
+                        },
+                        check_result="Potential risk",
+                        confidence_reason="Evaluated both X-Frame-Options and Content-Security-Policy frame-ancestors. Neither mechanism provides framing restrictions.",
+                        is_inferred=True,
+                        response_timestamp=resp.response_timestamp,
                     ),
                     potential_impact="Adversary can embed this page inside an invisible iframe on a malicious website to trick users into unintended actions (Clickjacking).",
                     remediation="Configure 'X-Frame-Options: DENY' or 'SAMEORIGIN', or declare CSP 'frame-ancestors 'self''.",
                     cwe_id="CWE-1021",
                     cve_id=None,
                     scanner_name=self.scanner_name,
-                    scanned_at=now,
+                    scanned_at=ts,
                     references=[
                         "https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html",
                         "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
@@ -535,7 +759,7 @@ class EvidenceBasedScanner:
             findings.append(
                 VulnerabilityFinding(
                     id="VULN-SEC-HDR-NO-REFERRER",
-                    title="Missing Referrer-Policy Header",
+                    title="Hardening Observation: Missing Referrer-Policy Header",
                     category="Security Headers",
                     severity="Low",
                     confidence="High",
@@ -543,10 +767,17 @@ class EvidenceBasedScanner:
                     evidence=FindingEvidence(
                         check_type="security_headers",
                         observed_data={"missing_header": "Referrer-Policy"},
-                        raw_snippet="Response header 'Referrer-Policy' is absent.",
+                        raw_snippet="Response header 'Referrer-Policy' is absent from HTTP response.",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={},
+                        check_result="Potential risk",
+                        confidence_reason="Absence of explicit Referrer-Policy is a hardening observation; modern browsers default to strict-origin-when-cross-origin, but explicit policy is recommended.",
+                        is_inferred=True,
+                        response_timestamp=resp.response_timestamp,
                     ),
-                    potential_impact="Browsers may leak sensitive URL parameters, session tokens, or internal path structures in the Referer header to third-party domains.",
+                    potential_impact="Browsers may leak sensitive URL parameters or internal path structures in the Referer header to third-party domains.",
                     remediation="Configure 'Referrer-Policy: strict-origin-when-cross-origin' or 'no-referrer'.",
                     cwe_id="CWE-200",
                     cve_id=None,
@@ -556,7 +787,7 @@ class EvidenceBasedScanner:
                         "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy",
                     ],
                     is_confirmed=True,
-                    validation_status="Security Weakness",
+                    validation_status="Informational Observation",
                 )
             )
 
@@ -565,7 +796,7 @@ class EvidenceBasedScanner:
             findings.append(
                 VulnerabilityFinding(
                     id="VULN-SEC-HDR-NO-PERMISSIONS",
-                    title="Missing Permissions-Policy Header",
+                    title="Hardening Observation: Missing Permissions-Policy Header",
                     category="Security Headers",
                     severity="Low",
                     confidence="Medium",
@@ -573,8 +804,15 @@ class EvidenceBasedScanner:
                     evidence=FindingEvidence(
                         check_type="security_headers",
                         observed_data={"missing_header": "Permissions-Policy"},
-                        raw_snippet="Response header 'Permissions-Policy' is absent.",
+                        raw_snippet="Response header 'Permissions-Policy' (and legacy 'Feature-Policy') is absent.",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={},
+                        check_result="Potential risk",
+                        confidence_reason="Hardware features are not explicitly locked down. Recommended hardening observation to restrict camera, microphone, and geolocation.",
+                        is_inferred=True,
+                        response_timestamp=resp.response_timestamp,
                     ),
                     potential_impact="Browser hardware APIs (camera, microphone, geolocation) are not explicitly restricted, increasing risk if a subresource or third-party script is compromised.",
                     remediation="Add 'Permissions-Policy: camera=(), microphone=(), geolocation=()' to limit sensitive browser API access.",
@@ -586,7 +824,7 @@ class EvidenceBasedScanner:
                         "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy",
                     ],
                     is_confirmed=True,
-                    validation_status="Security Weakness",
+                    validation_status="Informational Observation",
                 )
             )
 
@@ -609,6 +847,13 @@ class EvidenceBasedScanner:
                         observed_data={"Access-Control-Allow-Origin": acao, "Access-Control-Allow-Credentials": acac},
                         raw_snippet=f"Access-Control-Allow-Origin: {acao}; Access-Control-Allow-Credentials: {acac}",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={"access-control-allow-origin": acao, "access-control-allow-credentials": acac},
+                        check_result="Confirmed observation",
+                        confidence_reason="Direct empirical observation of wildcard origin configured with credentials flag enabled.",
+                        is_inferred=False,
+                        response_timestamp=resp.response_timestamp,
                     ),
                     potential_impact="Untrusted origins can read authenticated API responses and compromise sensitive user session data.",
                     remediation="Never combine wildcard '*' Access-Control-Allow-Origin with Access-Control-Allow-Credentials: true. Specify trusted whitelist origins explicitly.",
@@ -637,6 +882,13 @@ class EvidenceBasedScanner:
                         observed_data={"Access-Control-Allow-Origin": acao},
                         raw_snippet=f"Access-Control-Allow-Origin: {acao}",
                         status_code=resp.status_code,
+                        requested_url=resp.requested_url,
+                        final_url=resp.final_url,
+                        observed_headers={"access-control-allow-origin": acao},
+                        check_result="Confirmed observation",
+                        confidence_reason="Direct observation of wildcard Access-Control-Allow-Origin header.",
+                        is_inferred=False,
+                        response_timestamp=resp.response_timestamp,
                     ),
                     potential_impact="Any external domain can read unauthenticated response payloads from this endpoint.",
                     remediation="If this endpoint is not meant as a public read-only API, restrict Access-Control-Allow-Origin to authorized corporate domains.",
@@ -680,6 +932,13 @@ class EvidenceBasedScanner:
                             observed_data={"cookie": cookie_name, "raw": cookie_str},
                             raw_snippet=f"Set-Cookie: {cookie_str}",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={"set-cookie": cookie_str},
+                            check_result="Confirmed observation",
+                            confidence_reason="Observed Set-Cookie response header issued over HTTPS without the Secure flag.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact="Cookie will be transmitted in cleartext if user ever clicks an HTTP link to the same origin, exposing session tokens.",
                         remediation=f"Append '; Secure' attribute when issuing Set-Cookie for '{cookie_name}'.",
@@ -710,6 +969,13 @@ class EvidenceBasedScanner:
                             observed_data={"cookie": cookie_name, "raw": cookie_str},
                             raw_snippet=f"Set-Cookie: {cookie_str}",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={"set-cookie": cookie_str},
+                            check_result="Confirmed observation",
+                            confidence_reason="Observed Set-Cookie response header does not contain the HttpOnly directive.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact="Client-side scripts can read this cookie via document.cookie, magnifying the impact of any Cross-Site Scripting (XSS) vulnerability.",
                         remediation=f"Append '; HttpOnly' attribute to '{cookie_name}' if not required by client-side JavaScript.",
@@ -750,6 +1016,13 @@ class EvidenceBasedScanner:
                             },
                             raw_snippet=f"Server: {server_banner}",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={"server": server_banner},
+                            check_result="Potential risk",
+                            confidence_reason="Inferred risk based on exact version banner match; vendor backported patches may be present without version changes.",
+                            is_inferred=True,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact=(
                             f"Observed server banner indicates component version mapped to {matched_cve['cve_id']}. "
@@ -781,6 +1054,13 @@ class EvidenceBasedScanner:
                             observed_data={"server_banner": server_banner},
                             raw_snippet=f"Server: {server_banner}",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={"server": server_banner},
+                            check_result="Confirmed observation",
+                            confidence_reason="Direct empirical observation of Server header containing granular version string.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact="Revealing exact software and version identifiers enables adversaries to query exploit databases for version-specific exploits.",
                         remediation="Configure web server to suppress granular version banners (e.g., ServerTokens Prod in Apache, server_tokens off in Nginx).",
@@ -817,6 +1097,13 @@ class EvidenceBasedScanner:
                             },
                             raw_snippet=f"X-Powered-By: {powered_by}",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={"x-powered-by": powered_by},
+                            check_result="Potential risk",
+                            confidence_reason="Inferred risk based on runtime framework version banner.",
+                            is_inferred=True,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact=(
                             f"Observed runtime banner indicates component version mapped to {matched_cve['cve_id']}. "
@@ -848,6 +1135,13 @@ class EvidenceBasedScanner:
                             observed_data={"x_powered_by": powered_by},
                             raw_snippet=f"X-Powered-By: {powered_by}",
                             status_code=resp.status_code,
+                            requested_url=resp.requested_url,
+                            final_url=resp.final_url,
+                            observed_headers={"x-powered-by": powered_by},
+                            check_result="Confirmed observation",
+                            confidence_reason="Direct empirical observation of framework technology disclosed in X-Powered-By header.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
                         ),
                         potential_impact="Assists attackers in fingerprinting backend frameworks and tailoring exploits to framework vulnerabilities.",
                         remediation="Disable the X-Powered-By header in application server or framework configuration (e.g., app.disable('x-powered-by') in Express).",
@@ -895,6 +1189,13 @@ class EvidenceBasedScanner:
                                 observed_data={"disallowed_sensitive_paths": disallowed_paths[:5]},
                                 raw_snippet=f"Disallowed paths found: {', '.join(disallowed_paths[:5])}",
                                 status_code=resp.status_code,
+                                requested_url=robots_url,
+                                final_url=resp.final_url,
+                                observed_headers={"content-type": resp.get_header("content-type") or ""},
+                                check_result="Confirmed observation",
+                                confidence_reason="Direct observation of administrative or internal path patterns listed in robots.txt Disallow directives.",
+                                is_inferred=False,
+                                response_timestamp=resp.response_timestamp,
                             ),
                             potential_impact="robots.txt reveals administrative or internal directory structures to search engines and public threat actors.",
                             remediation="Do not rely on robots.txt to hide sensitive endpoints. Implement proper access control and remove sensitive path entries.",
@@ -920,7 +1221,10 @@ class EvidenceBasedScanner:
 
         try:
             resp = self.client.request(sectxt_url, allowed_origin_host=host)
-            if resp.status_code != 200:
+            content_type = (resp.get_header("content-type") or "").lower()
+
+            # Case A: 404 Not Found -> Missing RFC 9116 security.txt
+            if resp.status_code == 404:
                 findings.append(
                     VulnerabilityFinding(
                         id="VULN-BEST-PRACTICE-NO-SECURITY-TXT",
@@ -931,11 +1235,18 @@ class EvidenceBasedScanner:
                         affected_url_or_component=sectxt_url,
                         evidence=FindingEvidence(
                             check_type="security_best_practice",
-                            observed_data={"status_code": resp.status_code},
-                            raw_snippet=f"GET /.well-known/security.txt returned HTTP {resp.status_code}",
-                            status_code=resp.status_code,
+                            observed_data={"status_code": 404, "endpoint": sectxt_url},
+                            raw_snippet=f"GET /.well-known/security.txt returned HTTP 404 Not Found",
+                            status_code=404,
+                            requested_url=sectxt_url,
+                            final_url=resp.final_url,
+                            observed_headers={"content-type": resp.get_header("content-type") or ""},
+                            check_result="Confirmed observation",
+                            confidence_reason="RFC 9116 security.txt endpoint returned HTTP 404 indicating no security disclosure contact is published.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
                         ),
-                        potential_impact="Security researchers discovering vulnerabilities lack an official, cryptographically verified reporting channel (RFC 9116).",
+                        potential_impact="Security researchers discovering vulnerabilities lack an official, standardized reporting channel (RFC 9116).",
                         remediation="Publish a valid RFC 9116 security.txt file at /.well-known/security.txt with Contact and Expires directives.",
                         cwe_id="CWE-1059",
                         cve_id=None,
@@ -948,5 +1259,91 @@ class EvidenceBasedScanner:
                         validation_status="Informational Observation",
                     )
                 )
+            # Case B: Inaccessible (401, 403, 5xx) -> Inconclusive
+            elif resp.status_code in (401, 403) or resp.status_code >= 500:
+                findings.append(
+                    VulnerabilityFinding(
+                        id="VULN-BEST-PRACTICE-INACCESSIBLE-SECURITY-TXT",
+                        title="Inaccessible Security Disclosure Endpoint (security.txt)",
+                        category="Security Best Practice",
+                        severity="Info",
+                        confidence="Medium",
+                        affected_url_or_component=sectxt_url,
+                        evidence=FindingEvidence(
+                            check_type="security_best_practice",
+                            observed_data={"status_code": resp.status_code, "endpoint": sectxt_url},
+                            raw_snippet=f"GET /.well-known/security.txt returned HTTP {resp.status_code} (Inaccessible)",
+                            status_code=resp.status_code,
+                            requested_url=sectxt_url,
+                            final_url=resp.final_url,
+                            observed_headers={"content-type": resp.get_header("content-type") or ""},
+                            check_result="Inconclusive",
+                            confidence_reason=f"Endpoint returned HTTP {resp.status_code}. Content could not be accessed to verify RFC 9116 compliance.",
+                            is_inferred=False,
+                            response_timestamp=resp.response_timestamp,
+                        ),
+                        potential_impact="Access to the RFC 9116 security disclosure file is restricted or rejected by authorization rules or gateway errors.",
+                        remediation="Ensure /.well-known/security.txt is publicly accessible without authentication or IP restrictions.",
+                        cwe_id="CWE-1059",
+                        cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://www.rfc-editor.org/rfc/rfc9116",
+                        ],
+                        is_confirmed=False,
+                        validation_status="Inconclusive",
+                    )
+                )
+            # Case C: HTTP 200 returned -> inspect content validity
+            elif resp.status_code == 200:
+                body = resp.body_text or ""
+                has_contact = any(line.strip().lower().startswith("contact:") for line in body.splitlines())
+                is_html = "text/html" in content_type or "<html" in body.lower()
+
+                if is_html or not has_contact:
+                    findings.append(
+                        VulnerabilityFinding(
+                            id="VULN-BEST-PRACTICE-INVALID-SECURITY-TXT",
+                            title="Invalid RFC 9116 security.txt Format",
+                            category="Security Best Practice",
+                            severity="Info",
+                            confidence="High",
+                            affected_url_or_component=sectxt_url,
+                            evidence=FindingEvidence(
+                                check_type="security_best_practice",
+                                observed_data={
+                                    "status_code": 200,
+                                    "content_type": content_type,
+                                    "has_contact_directive": has_contact,
+                                    "is_html": is_html,
+                                },
+                                raw_snippet=(
+                                    f"HTTP 200 returned but content violates RFC 9116: "
+                                    f"{'HTML page returned instead of text/plain' if is_html else 'Mandatory Contact directive missing'}"
+                                ),
+                                status_code=200,
+                                requested_url=sectxt_url,
+                                final_url=resp.final_url,
+                                observed_headers={"content-type": content_type},
+                                check_result="Confirmed observation",
+                                confidence_reason="RFC 9116 requires security.txt to be served as text/plain and must contain at least one valid 'Contact:' directive.",
+                                is_inferred=False,
+                                response_timestamp=resp.response_timestamp,
+                            ),
+                            potential_impact="Automated tools and security researchers parsing /.well-known/security.txt cannot extract a valid security contact.",
+                            remediation="Ensure /.well-known/security.txt is served as text/plain (UTF-8) and contains required 'Contact:' and 'Expires:' directives.",
+                            cwe_id="CWE-1059",
+                            cve_id=None,
+                            scanner_name=self.scanner_name,
+                            scanned_at=ts,
+                            references=[
+                                "https://www.rfc-editor.org/rfc/rfc9116",
+                            ],
+                            is_confirmed=True,
+                            validation_status="Confirmed Observation",
+                        )
+                    )
+                # If 200 and has_contact and not is_html: Valid security.txt! No vulnerability finding.
         except Exception:
             pass

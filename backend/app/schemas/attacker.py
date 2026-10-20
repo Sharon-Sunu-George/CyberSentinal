@@ -7,6 +7,13 @@ class FindingEvidence(BaseModel):
     observed_data: Dict[str, Any] = Field(default_factory=dict, description="Concrete empirical data observed from response")
     raw_snippet: Optional[str] = Field(None, description="Relevant excerpt, header snippet, or wire observation")
     status_code: Optional[int] = Field(None, description="HTTP status code associated with probe")
+    requested_url: Optional[str] = Field(None, description="Original target URL requested")
+    final_url: Optional[str] = Field(None, description="Final resolved URL after redirects")
+    observed_headers: Dict[str, str] = Field(default_factory=dict, description="Observed response headers relevant to this check")
+    check_result: Optional[str] = Field(None, description="Evaluation outcome summary: e.g. 'Confirmed observation', 'Potential risk', 'Inconclusive', 'Scan error'")
+    confidence_reason: Optional[str] = Field(None, description="Detailed reasoning explaining the confidence level and factual grounding")
+    is_inferred: bool = Field(default=False, description="True if finding is an inferred risk rather than a direct wire observation")
+    response_timestamp: Optional[str] = Field(None, description="ISO-8601 timestamp of the observed HTTP interaction")
 
 
 class VulnerabilityFinding(BaseModel):
@@ -149,6 +156,8 @@ class AttackerScanResponse(BaseModel):
         default=None,
         description="Honest security disclaimer if zero findings are returned"
     )
+    is_inconclusive: bool = Field(default=False, description="True if the scan encountered upstream gateway/proxy failure or connection error")
+    allows_retry: bool = Field(default=False, description="True if scan failed or was inconclusive due to temporary network/proxy error and can be retried")
     summary: AttackerScanSummary
     findings: List[VulnerabilityFinding]
     discovered_pages: List[DiscoveredPage] = Field(default_factory=list, description="Pages discovered during full-site crawl")

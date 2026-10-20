@@ -295,6 +295,7 @@ export const apiClient = {
     findings: any[]
     available_budget: number
     hourly_rate?: number
+    currency?: string
     business_criticality?: string
   }): Promise<DefenderAnalysisResponse> {
     const res = await fetch(`${API_BASE_URL}/api/v1/defender/analyze`, {
@@ -329,6 +330,48 @@ export const apiClient = {
     return res.json()
   },
 
+  async verifyRemediation(
+    scanId: string,
+    findingId: string,
+    targetUrl?: string
+  ): Promise<VerifyRemediationResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/remediation/${scanId}/${findingId}/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_url: targetUrl }),
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async getRemediationHistory(
+    scanId: string,
+    findingId?: string
+  ): Promise<{
+    scan_id: string
+    finding_id?: string
+    total_events: number
+    history: Array<{
+      id: number
+      scan_id: string
+      finding_id: string
+      old_status: string
+      new_status: string
+      evidence?: any
+      notes?: string
+      changed_at: string
+    }>
+  }> {
+    const query = findingId ? `?finding_id=${encodeURIComponent(findingId)}` : ""
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/remediation/${scanId}/history${query}`)
+    if (!res.ok) throw new Error(`Failed to load remediation history: HTTP ${res.status}`)
+    return res.json()
+  },
+
   async getDefenderPlan(scanId: string): Promise<DefenderAnalysisResponse> {
     const res = await fetch(`${API_BASE_URL}/api/v1/defender/scans/${scanId}/plan`)
     if (!res.ok) throw new Error(`Failed to load remediation plan: HTTP ${res.status}`)
@@ -336,9 +379,11 @@ export const apiClient = {
   },
 
   async getDefenderSettings(): Promise<{
-    currency: string
+    currencies: string[]
+    default_currency: string
     default_hourly_rate: number
     valid_statuses: string[]
+    lifecycle_stages: string[]
     cost_assumptions: string[]
   }> {
     const res = await fetch(`${API_BASE_URL}/api/v1/defender/settings`)
@@ -352,6 +397,13 @@ export interface FindingEvidence {
   observed_data: Record<string, any>
   raw_snippet?: string | null
   status_code?: number | null
+  requested_url?: string | null
+  final_url?: string | null
+  observed_headers?: Record<string, string>
+  check_result?: string | null
+  confidence_reason?: string | null
+  is_inferred?: boolean
+  response_timestamp?: string | null
 }
 
 export interface VulnerabilityFinding {
@@ -461,6 +513,8 @@ export interface AttackerScanResponse {
   }
   scope_limitations: string
   zero_findings_disclaimer?: string | null
+  is_inconclusive?: boolean
+  allows_retry?: boolean
   summary: AttackerScanSummary
   findings: VulnerabilityFinding[]
   discovered_pages?: DiscoveredPage[]
@@ -472,32 +526,48 @@ export interface RemediationRecommendation {
   finding_id: string
   finding_title: string
   severity: "Critical" | "High" | "Medium" | "Low" | "Info"
+  confidence?: "High" | "Medium" | "Low"
   category: string
   cwe_id?: string | null
   cve_id?: string | null
   affected_url_or_component: string
+  short_explanation?: string
+  why_it_matters?: string
   root_cause: string
   actionable_fix: string
+  recommended_fix?: string
   implementation_steps: string[]
   code_snippets: Record<string, string>
+  file_or_config_location?: string
+  implementation_difficulty?: "Easy" | "Moderate" | "Hard"
   estimated_effort_hours: number
   hourly_rate: number
+  currency?: string
   labor_cost: number
   service_cost: number
   total_cost: number
+  cost_assumption?: string
   risk_score: number
+  priority_score?: number
+  priority_explanation?: string
   projected_risk_reduction: number
+  risk_reduction_expected?: string
   cost_efficiency: number
   priority_group: "fix_immediately" | "fix_next" | "defer_or_mitigate"
   priority_rationale: string
   deferral_reason?: string | null
   temporary_mitigation?: string | null
+  dependencies_and_side_effects?: string
   dependencies: string[]
   assumptions: string[]
   confidence_range: string
+  validation_steps?: string[]
   verification_procedure: string
-  status: "Open" | "Planned" | "In Progress" | "Fixed" | "Accepted Risk" | "Verified"
+  rollback_guidance?: string
+  status: "Not Started" | "In Progress" | "Fixed Pending Verification" | "Verified Fixed" | "Reopened" | "Open" | "Planned" | "Fixed" | "Accepted Risk" | "Verified" | "Needs Verification"
+  remediation_status?: string
   status_notes?: string | null
+  verification_evidence?: Record<string, any> | null
 }
 
 export interface DefenderAnalysisResponse {
@@ -521,5 +591,22 @@ export interface DefenderAnalysisResponse {
   defer_or_mitigate: RemediationRecommendation[]
   unbudgeted_high_risk_findings: RemediationRecommendation[]
   scoring_model_notes: string[]
+  cost_assumptions?: string[]
   created_at: string
+}
+
+export interface VerifyRemediationResponse {
+  scan_id: string
+  finding_id: string
+  target_url: string
+  previous_status: string
+  new_status: string
+  is_verified: boolean
+  verification_passed: boolean
+  is_inconclusive: boolean
+  evidence_summary: string
+  observed_headers: Record<string, string>
+  observed_status?: number | null
+  verification_timestamp: string
+  message: string
 }
