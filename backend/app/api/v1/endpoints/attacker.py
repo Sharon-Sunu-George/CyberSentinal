@@ -9,6 +9,7 @@ Provides:
 - GET /api/v1/attacker/scanner-status to inspect scanner capabilities & OWASP ZAP availability.
 """
 
+import os
 import threading
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, status
