@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 python-dotenv
+playwright>=1.40.0

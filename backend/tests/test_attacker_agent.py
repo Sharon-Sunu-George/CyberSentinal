@@ -12,6 +12,7 @@ Covers:
 - FastAPI endpoint contracts and error boundaries.
 """
 
+import os
 import socket
 import unittest
 from unittest.mock import MagicMock, patch
@@ -447,6 +448,141 @@ class TestAttackerEndpoint(unittest.TestCase):
             # Release acquired slots to restore state
             for _ in acquired_slots:
                 scan_limiter.release()
+
+
+class TestLocalDevScanningOptIn(unittest.TestCase):
+    """
+    Verifies the opt-in local development scanning workflow:
+    1. Disabled by default in production.
+    2. Only accepts the strictly configured host & port (e.g. localhost:4000).
+    3. Rejects other internal/private ports, IPs, and cloud metadata.
+    4. Prohibits redirects escaping to other local services or ports.
+    5. Confirms that public-target scanning protections remain active.
+    """
+
+    def test_default_production_blocks_localhost_and_ports(self):
+        # Ensure dev flags are NOT set
+        with patch.dict(os.environ, {"ALLOW_LOCAL_DEV_SCAN": "", "CYBERSENTINEL_ENV": "production"}):
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                normalize_target_url("http://localhost:4000")
+            self.assertIn("prohibited loopback/internal destination", str(ctx.exception))
+
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://127.0.0.1:4000")
+
+    def test_configured_local_target_accepted_in_dev_mode(self):
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            norm_url, host, port, path = normalize_target_url("http://localhost:4000/app")
+            self.assertEqual(norm_url, "http://localhost:4000/app")
+            self.assertEqual(host, "localhost")
+            self.assertEqual(port, 4000)
+
+            # Verification of IP resolution with loopback address
+            mock_addrinfo = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 4000)),
+            ]
+            with patch("socket.getaddrinfo", return_value=mock_addrinfo):
+                ip_str, family = resolve_and_verify_ip("localhost", 4000)
+                self.assertEqual(ip_str, "127.0.0.1")
+                self.assertEqual(family, socket.AF_INET)
+
+    def test_unrelated_local_ports_rejected_even_in_dev_mode(self):
+        # If LOCAL_DEV_TARGET is port 4000, attempt to scan port 8080 or port 22 or port 8010 must be blocked
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            # Port 8010 (our backend)
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://localhost:8010")
+
+            # Port 22 (SSH)
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://localhost:22")
+
+            # Port 8080 (ZAP or internal service)
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://localhost:8080")
+
+    def test_private_networks_and_metadata_blocked_in_dev_mode(self):
+        # Even with local dev scan enabled, other private IPs and cloud metadata MUST remain blocked
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            # Cloud metadata
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://169.254.169.254/latest/meta-data/")
+
+            # RFC1918 Private networks
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://192.168.1.1:4000")
+
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://10.0.0.1:4000")
+
+    def test_redirect_from_local_target_cannot_escape_port_or_host(self):
+        # A test application on localhost:4000 attempting to redirect to localhost:8010 or 169.254.169.254
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            mock_client = SafeHttpClient()
+
+            # Attempt redirect to another port (rejected either by SSRF guard or redirect port constraint)
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                mock_client.request(
+                    "http://localhost:8010/internal",
+                    allowed_origin_scheme="http",
+                    allowed_origin_host="localhost",
+                    allowed_origin_port=4000,
+                    redirect_depth=1,
+                )
+            self.assertTrue(
+                "escapes authorized target port scope" in str(ctx.exception)
+                or "prohibited loopback/internal destination" in str(ctx.exception)
+            )
+
+            # Attempt redirect to another host (e.g. cloud metadata)
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                mock_client.request(
+                    "http://169.254.169.254/metadata",
+                    allowed_origin_scheme="http",
+                    allowed_origin_host="localhost",
+                    allowed_origin_port=4000,
+                    redirect_depth=1,
+                )
+            self.assertTrue(
+                "escapes authorized target host" in str(ctx.exception)
+                or "prohibited private" in str(ctx.exception)
+            )
+
+    def test_dns_rebinding_to_private_non_loopback_rejected_in_dev_mode(self):
+        # If localhost:4000 resolved to a non-loopback private IP (e.g. 10.0.0.1 or 192.168.1.5), it must be rejected
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            mock_addrinfo = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 4000)),
+            ]
+            with patch("socket.getaddrinfo", return_value=mock_addrinfo):
+                with self.assertRaises(SSRFProtectionError) as ctx:
+                    resolve_and_verify_ip("localhost", 4000)
+                self.assertIn("non-loopback prohibited address", str(ctx.exception))
 
 
 if __name__ == "__main__":

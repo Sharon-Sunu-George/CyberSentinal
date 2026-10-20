@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import risk, simulation, settings, attacker
+from app.api.v1.endpoints import risk, simulation, settings, attacker, defender
 
 api_router = APIRouter()
 
@@ -29,4 +29,11 @@ api_router.include_router(
     attacker.router,
     prefix="/attacker",
     tags=["Attacker Agent"]
+)
+
+# Register Defender Agent endpoints under /defender prefix
+api_router.include_router(
+    defender.router,
+    prefix="/defender",
+    tags=["Defender Agent"]
 )

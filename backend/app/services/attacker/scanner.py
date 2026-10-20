@@ -1,15 +1,19 @@
 """
-Safe, Bounded Web Vulnerability Scanner for CyberQuant Attacker Agent.
+Safe, Bounded Web Vulnerability Scanner for CyberSentinal Attacker Agent.
 Performs conservative, non-destructive checks against authorized targets:
-- Security headers
-- Cookie security flags
-- Transport / HTTPS configuration
-- Information disclosure (Server, X-Powered-By)
-- Safely exposed metadata (robots.txt, security.txt)
-- Known CVE correlation based strictly on empirical version evidence.
+- Transport / HTTPS & HSTS configuration (CWE-319)
+- Essential security headers: CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy (CWE-693, CWE-1021, CWE-200)
+- CORS header policies (CWE-942)
+- Cookie security flags: Secure, HttpOnly (CWE-614, CWE-1004)
+- Information disclosure: Server banners, X-Powered-By (CWE-200)
+- Safely exposed metadata: robots.txt, RFC 9116 security.txt
+- Known CVE correlation based strictly on empirical version evidence
+- Configurable scanner service with honest OWASP ZAP discovery and fallback reporting.
 """
 
+import datetime
 import http.client
+import os
 import re
 import socket
 import ssl
@@ -27,7 +31,7 @@ from app.services.attacker.ssrf_guard import (
 DEFAULT_TIMEOUT_SECONDS = 5.0
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB limit to prevent resource exhaustion
 MAX_REDIRECT_HOPS = 2
-USER_AGENT = "CyberQuant-Security-Auditor/1.0 (+https://cyberquant.ai/scanner-policy)"
+USER_AGENT = "CyberSentinal-Security-Auditor/2.0 (+https://cybersentinel.ai/scanner-policy)"
 
 
 class SafeHttpResponse:
@@ -86,108 +90,96 @@ class SafeHttpClient:
         normalized_url, hostname, port, path = normalize_target_url(url)
         current_scheme = "https" if normalized_url.startswith("https://") else "http"
 
-        # Initialize origin scope on initial request (depth 0)
         target_scheme = allowed_origin_scheme or current_scheme
         target_host = allowed_origin_host or hostname
         target_port = allowed_origin_port or port
 
-        # Scope validation on redirects (depth > 0)
         if redirect_depth > 0:
-            # 1. Hostname constraint
             if hostname != target_host:
                 raise SSRFProtectionError(
                     f"Redirect to host '{hostname}' rejected: escapes authorized target host '{target_host}'."
                 )
 
-            # 2. Scheme constraint: HTTPS cannot downgrade to HTTP
             if target_scheme == "https" and current_scheme == "http":
                 raise SSRFProtectionError(
                     f"Redirect scheme downgrade from HTTPS to HTTP on '{hostname}' is prohibited."
                 )
 
-            # 3. Port constraint: Cannot redirect to arbitrary non-standard service ports
             if port != target_port:
-                # Only allow standard web port upgrade (80 -> 443 on HTTPS)
                 if not (target_port == 80 and port == 443 and current_scheme == "https"):
                     raise SSRFProtectionError(
                         f"Redirect to port {port} rejected: escapes authorized target port scope {target_port}."
                     )
 
-        # Resolve and pin IP before connecting (DNS rebinding protection)
         verified_ip, family = resolve_and_verify_ip(hostname, port)
         is_https = (current_scheme == "https")
 
         raw_sock = None
-        conn = None
-
         try:
-            # Establish direct socket connection to verified IP
             raw_sock = socket.socket(family, socket.SOCK_STREAM)
             raw_sock.settimeout(self.timeout)
             raw_sock.connect((verified_ip, port))
 
             if is_https:
-                ssl_ctx = ssl.create_default_context()
-                # Wrap socket preserving SNI hostname for TLS verification
-                sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=hostname)
+                ssl_context = ssl.create_default_context()
+                sock = ssl_context.wrap_socket(raw_sock, server_hostname=hostname)
             else:
                 sock = raw_sock
 
-            # Use http.client over established, verified socket
-            if is_https:
-                conn = http.client.HTTPSConnection(hostname, port=port, timeout=self.timeout)
-            else:
-                conn = http.client.HTTPConnection(hostname, port=port, timeout=self.timeout)
+            path_and_query = path or "/"
+            request_bytes = (
+                f"{method} {path_and_query} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"User-Agent: {USER_AGENT}\r\n"
+                f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("latin-1")
 
-            conn.sock = sock
+            sock.sendall(request_bytes)
 
-            req_headers = {
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Host": hostname if (port in (80, 443)) else f"{hostname}:{port}",
-                "Connection": "close",
-            }
-
-            conn.request(method, path, headers=req_headers)
-            response = conn.getresponse()
-
-            # Read bounded body
-            body_chunks = []
-            bytes_read = 0
-            while True:
-                chunk = response.read(8192)
+            response_data = bytearray()
+            while len(response_data) < MAX_RESPONSE_BYTES:
+                chunk = sock.recv(4096)
                 if not chunk:
                     break
-                body_chunks.append(chunk)
-                bytes_read += len(chunk)
-                if bytes_read > MAX_RESPONSE_BYTES:
-                    break
+                response_data.extend(chunk)
 
-            raw_body = b"".join(body_chunks)
-            body_text = raw_body.decode("utf-8", errors="replace")
+            raw_text = response_data.decode("latin-1", errors="replace")
+            header_part, _, body_text = raw_text.partition("\r\n\r\n")
 
-            # Collect response headers
-            headers_dict: Dict[str, str] = {}
-            cookie_headers: List[str] = []
-            for header_name, header_val in response.getheaders():
-                if header_name.lower() == "set-cookie":
-                    cookie_headers.append(header_val)
-                headers_dict[header_name] = header_val
+            header_lines = header_part.split("\r\n")
+            status_line = header_lines[0] if header_lines else "HTTP/1.1 500 Error"
+            parts = status_line.split(" ", 2)
+            try:
+                status_code = int(parts[1]) if len(parts) > 1 else 500
+            except ValueError:
+                status_code = 500
 
-            if cookie_headers:
-                headers_dict["set-cookie"] = "\n".join(cookie_headers)
+            headers: Dict[str, str] = {}
+            for line in header_lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k_clean = k.strip()
+                    v_clean = v.strip()
+                    if k_clean.lower() in [h.lower() for h in headers]:
+                        for existing_key in list(headers.keys()):
+                            if existing_key.lower() == k_clean.lower():
+                                headers[existing_key] += f"\n{v_clean}"
+                    else:
+                        headers[k_clean] = v_clean
 
-            status_code = response.status
-
-            # Handle redirects safely
+            # Handle redirects
             if status_code in (301, 302, 303, 307, 308):
-                location = headers_dict.get("location") or headers_dict.get("Location")
+                location = None
+                for k, v in headers.items():
+                    if k.lower() == "location":
+                        location = v.split("\n")[0].strip()
+                        break
+
                 if location:
-                    redirect_url = urllib.parse.urljoin(normalized_url, location)
-                    conn.close()
-                    conn = None
+                    next_url = urllib.parse.urljoin(normalized_url, location)
                     return self.request(
-                        redirect_url,
+                        url=next_url,
                         method="GET",
                         allowed_origin_scheme=target_scheme,
                         allowed_origin_host=target_host,
@@ -198,46 +190,123 @@ class SafeHttpClient:
             return SafeHttpResponse(
                 url=normalized_url,
                 status_code=status_code,
-                headers=headers_dict,
+                headers=headers,
                 body_text=body_text,
                 remote_ip=verified_ip,
                 was_https=is_https,
             )
-
-        except (socket.timeout, TimeoutError):
-            raise TimeoutError(f"Connection to '{hostname}' timed out after {self.timeout}s.")
-        except Exception:
-            raise
         finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            elif raw_sock:
+            if raw_sock:
                 try:
                     raw_sock.close()
                 except Exception:
                     pass
 
 
+def probe_owasp_zap_status() -> Dict[str, Any]:
+    """
+    Checks if an external OWASP ZAP daemon is running and reachable.
+    Reports honest status without fabricating ZAP availability.
+    """
+    zap_host = os.getenv("ZAP_HOST", "127.0.0.1")
+    zap_port = int(os.getenv("ZAP_PORT", "8080"))
+    zap_api_key = os.getenv("ZAP_API_KEY", "")
+
+    is_available = False
+    zap_version = None
+    setup_instructions = (
+        "OWASP ZAP daemon is not currently active on {}:{} (optional). "
+        "The assessment ran using CyberSentinal's built-in evidence-based passive scanner. "
+        "To enable OWASP ZAP integration, install ZAP and run: "
+        "'zap.sh -daemon -port 8080 -config api.disablekey=true' (or set ZAP_HOST / ZAP_PORT / ZAP_API_KEY)."
+    ).format(zap_host, zap_port)
+
+    # Check connection with brief 0.5s timeout
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        result = sock.connect_ex((zap_host, zap_port))
+        sock.close()
+
+        if result == 0:
+            is_available = True
+            setup_instructions = f"OWASP ZAP daemon detected and reachable on {zap_host}:{zap_port}."
+            # Attempt version read
+            try:
+                conn = http.client.HTTPConnection(zap_host, zap_port, timeout=1.0)
+                path = f"/JSON/core/view/version/?apikey={zap_api_key}" if zap_api_key else "/JSON/core/view/version/"
+                conn.request("GET", path)
+                resp = conn.getresponse()
+                if resp.status == 200:
+                    import json
+                    body = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                    zap_version = body.get("version", "2.x")
+                conn.close()
+            except Exception:
+                zap_version = "Connected"
+    except Exception:
+        is_available = False
+
+    return {
+        "is_available": is_available,
+        "service_name": "OWASP ZAP (Zed Attack Proxy)",
+        "endpoint": f"{zap_host}:{zap_port}",
+        "version": zap_version,
+        "instructions": setup_instructions,
+    }
+
+
 class EvidenceBasedScanner:
     """
-    Executes non-destructive evidence-based security auditing.
+    Executes safe, non-destructive evidence-based security auditing.
     Never confirms a vulnerability without observed proof.
     """
 
     def __init__(self, client: Optional[SafeHttpClient] = None):
         self.client = client or SafeHttpClient()
+        self.scanner_name = "CyberSentinal Evidence-Based Scanner v2.0"
 
     def scan(self, target_url: str) -> Tuple[List[VulnerabilityFinding], Dict[str, Any]]:
         normalized_url, hostname, port, path = normalize_target_url(target_url)
         findings: List[VulnerabilityFinding] = []
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        # Check OWASP ZAP availability
+        zap_status = probe_owasp_zap_status()
+
         scan_meta: Dict[str, Any] = {
             "target_url": target_url,
             "normalized_url": normalized_url,
             "target_host": hostname,
             "target_ip": None,
+            "scanned_at": now,
+            "scanner_name": self.scanner_name,
+            "scanner_info": {
+                "engine": self.scanner_name,
+                "mode": "passive-safe",
+                "zap_integration": zap_status,
+                "checks_executed": [
+                    "Transport Security & HTTPS (CWE-319)",
+                    "Strict-Transport-Security HSTS (CWE-319/CWE-523)",
+                    "Content-Security-Policy (CWE-693)",
+                    "X-Content-Type-Options nosniff (CWE-693)",
+                    "X-Frame-Options / frame-ancestors Clickjacking (CWE-1021)",
+                    "Referrer-Policy Header (CWE-200)",
+                    "Permissions-Policy Header (CWE-693)",
+                    "Cross-Origin Resource Sharing (CORS) Policy (CWE-942)",
+                    "Cookie Security Flags (Secure & HttpOnly) (CWE-614/CWE-1004)",
+                    "Server & Runtime Banner Information Disclosure (CWE-200)",
+                    "Sensitive Endpoints in robots.txt (CWE-200)",
+                    "RFC 9116 security.txt Contact Configuration",
+                    "CVE Knowledge Correlation (Exact Component Version Evidence)",
+                ],
+            },
+            "scope_limitations": (
+                "Scan is strictly limited to authorized external HTTP/TLS non-destructive auditing. "
+                "Checks include response header analysis, TLS configuration, cookie flags, exposed metadata files, "
+                "and component version matching. Does NOT perform invasive payload injection, automated exploit delivery, "
+                "fuzzing, or password cracking."
+            ),
         }
 
         # Probe 1: Primary Target Page
@@ -250,26 +319,41 @@ class EvidenceBasedScanner:
             raise
 
         # Check 1: HTTPS & Transport Security
-        self._check_transport_security(main_resp, findings)
+        self._check_transport_security(main_resp, findings, now)
 
-        # Check 2: Essential Security Headers
-        self._check_security_headers(main_resp, findings)
+        # Check 2: Essential Security Headers (CSP, X-Content-Type-Options, XFO)
+        self._check_security_headers(main_resp, findings, now)
 
-        # Check 3: Cookie Security Flags
-        self._check_cookie_flags(main_resp, findings)
+        # Check 3: Privacy & Exposure Headers (Referrer-Policy, Permissions-Policy)
+        self._check_privacy_and_permissions_headers(main_resp, findings, now)
 
-        # Check 4: Information Disclosure (Server & X-Powered-By)
-        self._check_information_disclosure(main_resp, findings)
+        # Check 4: CORS Configuration
+        self._check_cors_policy(main_resp, findings, now)
 
-        # Check 5: Safely Exposed Resources (/robots.txt)
-        self._check_robots_txt(hostname, port, main_resp.was_https, findings)
+        # Check 5: Cookie Security Flags
+        self._check_cookie_flags(main_resp, findings, now)
 
-        # Check 6: Security.txt Presence
-        self._check_security_txt(hostname, port, main_resp.was_https, findings)
+        # Check 6: Information Disclosure (Server & X-Powered-By)
+        self._check_information_disclosure(main_resp, findings, now)
 
-        return findings, scan_meta
+        # Check 7: Safely Exposed Resources (/robots.txt)
+        self._check_robots_txt(hostname, port, main_resp.was_https, findings, now)
 
-    def _check_transport_security(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding]):
+        # Check 8: Security.txt Presence
+        self._check_security_txt(hostname, port, main_resp.was_https, findings, now)
+
+        # Deduplicate findings by ID
+        unique_findings: List[VulnerabilityFinding] = []
+        seen_ids = set()
+        for f in findings:
+            if f.id not in seen_ids:
+                seen_ids.add(f.id)
+                unique_findings.append(f)
+
+        return unique_findings, scan_meta
+
+    def _check_transport_security(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         if not resp.was_https:
             findings.append(
                 VulnerabilityFinding(
@@ -286,14 +370,20 @@ class EvidenceBasedScanner:
                         status_code=resp.status_code,
                     ),
                     potential_impact="Network eavesdroppers and man-in-the-middle attackers can intercept or modify transmitted credentials, session cookies, and sensitive payloads.",
-                    remediation="Migrate site to HTTPS, redirect all HTTP port 80 traffic to HTTPS port 443, and enable HSTS.",
+                    remediation="Migrate site to HTTPS, redirect all HTTP port 80 traffic to HTTPS port 443, and configure HSTS.",
+                    cwe_id="CWE-319",
                     cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=now,
+                    references=[
+                        "https://owasp.org/www-project-top-ten/2017/A3_2017-Sensitive_Data_Exposure",
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html",
+                    ],
                     is_confirmed=True,
                     validation_status="Confirmed Observation",
                 )
             )
         else:
-            # Check HSTS (Strict-Transport-Security)
             hsts = resp.get_header("Strict-Transport-Security")
             if not hsts:
                 findings.append(
@@ -312,14 +402,21 @@ class EvidenceBasedScanner:
                         ),
                         potential_impact="Users connecting over insecure networks can be downgraded to unencrypted HTTP via SSL-stripping attacks on subsequent visits.",
                         remediation="Configure 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' in web server configuration.",
+                        cwe_id="CWE-319",
                         cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=now,
+                        references=[
+                            "https://datatracker.ietf.org/doc/html/rfc6797",
+                            "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Strict_Transport_Security_Cheat_Sheet.html",
+                        ],
                         is_confirmed=True,
                         validation_status="Security Weakness",
                     )
                 )
 
-    def _check_security_headers(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding]):
-        # Check Content-Security-Policy
+    def _check_security_headers(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         csp = resp.get_header("Content-Security-Policy")
         if not csp:
             findings.append(
@@ -338,13 +435,19 @@ class EvidenceBasedScanner:
                     ),
                     potential_impact="Increases susceptibility to Cross-Site Scripting (XSS), clickjacking, and unauthorized inline script or data injection.",
                     remediation="Define a restrictive Content Security Policy (e.g., default-src 'self'; script-src 'self'; object-src 'none').",
+                    cwe_id="CWE-693",
                     cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=now,
+                    references=[
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP",
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html",
+                    ],
                     is_confirmed=True,
                     validation_status="Security Weakness",
                 )
             )
 
-        # Check X-Content-Type-Options
         xcto = resp.get_header("X-Content-Type-Options")
         if not xcto or "nosniff" not in xcto.lower():
             findings.append(
@@ -363,13 +466,18 @@ class EvidenceBasedScanner:
                     ),
                     potential_impact="Browsers may MIME-sniff response bodies away from the declared Content-Type, potentially executing non-executable files as JavaScript or HTML.",
                     remediation="Add 'X-Content-Type-Options: nosniff' to web server response headers.",
+                    cwe_id="CWE-693",
                     cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=now,
+                    references=[
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options",
+                    ],
                     is_confirmed=True,
                     validation_status="Security Weakness",
                 )
             )
 
-        # Check X-Frame-Options & CSP frame-ancestors
         xfo = resp.get_header("X-Frame-Options")
         has_effective_xfo = bool(xfo and xfo.strip().upper() in ("DENY", "SAMEORIGIN"))
 
@@ -378,7 +486,6 @@ class EvidenceBasedScanner:
             for directive in csp.split(";"):
                 parts = directive.strip().split()
                 if parts and parts[0].lower() == "frame-ancestors":
-                    # Must contain effective allowed values (e.g. 'none', 'self', or origins), not '*' or empty
                     if len(parts) > 1 and parts[1].strip() not in ("*", '""', "''"):
                         has_effective_frame_ancestors = True
                     break
@@ -408,13 +515,145 @@ class EvidenceBasedScanner:
                     ),
                     potential_impact="Adversary can embed this page inside an invisible iframe on a malicious website to trick users into unintended actions (Clickjacking).",
                     remediation="Configure 'X-Frame-Options: DENY' or 'SAMEORIGIN', or declare CSP 'frame-ancestors 'self''.",
+                    cwe_id="CWE-1021",
                     cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=now,
+                    references=[
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html",
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options",
+                    ],
                     is_confirmed=True,
                     validation_status="Security Weakness",
                 )
             )
 
-    def _check_cookie_flags(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding]):
+    def _check_privacy_and_permissions_headers(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        referrer_policy = resp.get_header("Referrer-Policy")
+        if not referrer_policy:
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-SEC-HDR-NO-REFERRER",
+                    title="Missing Referrer-Policy Header",
+                    category="Security Headers",
+                    severity="Low",
+                    confidence="High",
+                    affected_url_or_component=resp.url,
+                    evidence=FindingEvidence(
+                        check_type="security_headers",
+                        observed_data={"missing_header": "Referrer-Policy"},
+                        raw_snippet="Response header 'Referrer-Policy' is absent.",
+                        status_code=resp.status_code,
+                    ),
+                    potential_impact="Browsers may leak sensitive URL parameters, session tokens, or internal path structures in the Referer header to third-party domains.",
+                    remediation="Configure 'Referrer-Policy: strict-origin-when-cross-origin' or 'no-referrer'.",
+                    cwe_id="CWE-200",
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=ts,
+                    references=[
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy",
+                    ],
+                    is_confirmed=True,
+                    validation_status="Security Weakness",
+                )
+            )
+
+        permissions_policy = resp.get_header("Permissions-Policy") or resp.get_header("Feature-Policy")
+        if not permissions_policy:
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-SEC-HDR-NO-PERMISSIONS",
+                    title="Missing Permissions-Policy Header",
+                    category="Security Headers",
+                    severity="Low",
+                    confidence="Medium",
+                    affected_url_or_component=resp.url,
+                    evidence=FindingEvidence(
+                        check_type="security_headers",
+                        observed_data={"missing_header": "Permissions-Policy"},
+                        raw_snippet="Response header 'Permissions-Policy' is absent.",
+                        status_code=resp.status_code,
+                    ),
+                    potential_impact="Browser hardware APIs (camera, microphone, geolocation) are not explicitly restricted, increasing risk if a subresource or third-party script is compromised.",
+                    remediation="Add 'Permissions-Policy: camera=(), microphone=(), geolocation=()' to limit sensitive browser API access.",
+                    cwe_id="CWE-693",
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=ts,
+                    references=[
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy",
+                    ],
+                    is_confirmed=True,
+                    validation_status="Security Weakness",
+                )
+            )
+
+    def _check_cors_policy(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        acao = resp.get_header("Access-Control-Allow-Origin")
+        acac = resp.get_header("Access-Control-Allow-Credentials")
+
+        if acao == "*" and acac and acac.lower() == "true":
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-CORS-WILDCARD-CREDENTIALS",
+                    title="Overly Permissive CORS Policy with Credentials Allowed",
+                    category="Access Control",
+                    severity="High",
+                    confidence="High",
+                    affected_url_or_component=resp.url,
+                    evidence=FindingEvidence(
+                        check_type="cors",
+                        observed_data={"Access-Control-Allow-Origin": acao, "Access-Control-Allow-Credentials": acac},
+                        raw_snippet=f"Access-Control-Allow-Origin: {acao}; Access-Control-Allow-Credentials: {acac}",
+                        status_code=resp.status_code,
+                    ),
+                    potential_impact="Untrusted origins can read authenticated API responses and compromise sensitive user session data.",
+                    remediation="Never combine wildcard '*' Access-Control-Allow-Origin with Access-Control-Allow-Credentials: true. Specify trusted whitelist origins explicitly.",
+                    cwe_id="CWE-942",
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=ts,
+                    references=[
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Origin_Resource_Sharing_Cheat_Sheet.html",
+                    ],
+                    is_confirmed=True,
+                    validation_status="Confirmed Observation",
+                )
+            )
+        elif acao == "*":
+            findings.append(
+                VulnerabilityFinding(
+                    id="VULN-CORS-WILDCARD",
+                    title="Wildcard Access-Control-Allow-Origin Header",
+                    category="Access Control",
+                    severity="Low",
+                    confidence="High",
+                    affected_url_or_component=resp.url,
+                    evidence=FindingEvidence(
+                        check_type="cors",
+                        observed_data={"Access-Control-Allow-Origin": acao},
+                        raw_snippet=f"Access-Control-Allow-Origin: {acao}",
+                        status_code=resp.status_code,
+                    ),
+                    potential_impact="Any external domain can read unauthenticated response payloads from this endpoint.",
+                    remediation="If this endpoint is not meant as a public read-only API, restrict Access-Control-Allow-Origin to authorized corporate domains.",
+                    cwe_id="CWE-942",
+                    cve_id=None,
+                    scanner_name=self.scanner_name,
+                    scanned_at=ts,
+                    references=[
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS",
+                    ],
+                    is_confirmed=True,
+                    validation_status="Informational Observation",
+                )
+            )
+
+    def _check_cookie_flags(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         set_cookie_raw = resp.get_header("set-cookie")
         if not set_cookie_raw:
             return
@@ -426,7 +665,6 @@ class EvidenceBasedScanner:
             cookie_name = name_val.split("=")[0].strip() if "=" in name_val else name_val
             lower_parts = [p.lower() for p in parts[1:]]
 
-            # Check Secure flag
             is_secure = any("secure" == p for p in lower_parts)
             if not is_secure and resp.was_https:
                 findings.append(
@@ -445,13 +683,18 @@ class EvidenceBasedScanner:
                         ),
                         potential_impact="Cookie will be transmitted in cleartext if user ever clicks an HTTP link to the same origin, exposing session tokens.",
                         remediation=f"Append '; Secure' attribute when issuing Set-Cookie for '{cookie_name}'.",
+                        cwe_id="CWE-614",
                         cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#cookies-attributes",
+                        ],
                         is_confirmed=True,
                         validation_status="Confirmed Observation",
                     )
                 )
 
-            # Check HttpOnly flag
             is_httponly = any("httponly" == p for p in lower_parts)
             if not is_httponly:
                 findings.append(
@@ -470,17 +713,22 @@ class EvidenceBasedScanner:
                         ),
                         potential_impact="Client-side scripts can read this cookie via document.cookie, magnifying the impact of any Cross-Site Scripting (XSS) vulnerability.",
                         remediation=f"Append '; HttpOnly' attribute to '{cookie_name}' if not required by client-side JavaScript.",
+                        cwe_id="CWE-1004",
                         cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#httponly-flag",
+                        ],
                         is_confirmed=True,
                         validation_status="Confirmed Observation",
                     )
                 )
 
-    def _check_information_disclosure(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding]):
-        # Server banner
+    def _check_information_disclosure(self, resp: SafeHttpResponse, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         server_banner = resp.get_header("Server")
         if server_banner:
-            # Check if version numbers are disclosed (e.g. Apache/2.4.49, nginx/1.16.0)
             has_version = bool(re.search(r"\d+\.\d+", server_banner))
             matched_cve = match_known_cve(server_banner) if has_version else None
 
@@ -508,7 +756,13 @@ class EvidenceBasedScanner:
                             f"If active software is unpatched and lacks backported vendor fixes: {matched_cve['impact']}"
                         ),
                         remediation=matched_cve["remediation"],
+                        cwe_id="CWE-200",
                         cve_id=matched_cve["cve_id"],
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            f"https://nvd.nist.gov/vuln/detail/{matched_cve['cve_id']}",
+                        ],
                         is_confirmed=False,
                         validation_status="Requires Further Validation",
                     )
@@ -530,13 +784,18 @@ class EvidenceBasedScanner:
                         ),
                         potential_impact="Revealing exact software and version identifiers enables adversaries to query exploit databases for version-specific exploits.",
                         remediation="Configure web server to suppress granular version banners (e.g., ServerTokens Prod in Apache, server_tokens off in Nginx).",
+                        cwe_id="CWE-200",
                         cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://owasp.org/www-community/attacks/Fingerprinting",
+                        ],
                         is_confirmed=True,
                         validation_status="Confirmed Observation",
                     )
                 )
 
-        # X-Powered-By
         powered_by = resp.get_header("X-Powered-By")
         if powered_by:
             matched_cve = match_known_cve(powered_by)
@@ -564,7 +823,13 @@ class EvidenceBasedScanner:
                             f"If active software is unpatched and lacks backported vendor fixes: {matched_cve['impact']}"
                         ),
                         remediation=matched_cve["remediation"],
+                        cwe_id="CWE-200",
                         cve_id=matched_cve["cve_id"],
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            f"https://nvd.nist.gov/vuln/detail/{matched_cve['cve_id']}",
+                        ],
                         is_confirmed=False,
                         validation_status="Requires Further Validation",
                     )
@@ -586,13 +851,20 @@ class EvidenceBasedScanner:
                         ),
                         potential_impact="Assists attackers in fingerprinting backend frameworks and tailoring exploits to framework vulnerabilities.",
                         remediation="Disable the X-Powered-By header in application server or framework configuration (e.g., app.disable('x-powered-by') in Express).",
+                        cwe_id="CWE-200",
                         cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html",
+                        ],
                         is_confirmed=True,
                         validation_status="Confirmed Observation",
                     )
                 )
 
-    def _check_robots_txt(self, host: str, port: int, is_https: bool, findings: List[VulnerabilityFinding]):
+    def _check_robots_txt(self, host: str, port: int, is_https: bool, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         scheme = "https" if is_https else "http"
         port_suffix = f":{port}" if (is_https and port != 443) or (not is_https and port != 80) else ""
         robots_url = f"{scheme}://{host}{port_suffix}/robots.txt"
@@ -600,7 +872,6 @@ class EvidenceBasedScanner:
         try:
             resp = self.client.request(robots_url, allowed_origin_host=host)
             if resp.status_code == 200 and resp.body_text:
-                # Check for sensitive path keywords in Disallow directives
                 sensitive_patterns = [r"/admin", r"/backup", r"/private", r"/config", r"/internal", r"/api/v1/internal"]
                 disallowed_paths = []
                 for line in resp.body_text.splitlines():
@@ -620,23 +891,29 @@ class EvidenceBasedScanner:
                             confidence="High",
                             affected_url_or_component=robots_url,
                             evidence=FindingEvidence(
-                                check_type="info_disclosure",
+                                check_type="robots_txt",
                                 observed_data={"disallowed_sensitive_paths": disallowed_paths[:5]},
                                 raw_snippet=f"Disallowed paths found: {', '.join(disallowed_paths[:5])}",
                                 status_code=resp.status_code,
                             ),
                             potential_impact="robots.txt reveals administrative or internal directory structures to search engines and public threat actors.",
                             remediation="Do not rely on robots.txt to hide sensitive endpoints. Implement proper access control and remove sensitive path entries.",
+                            cwe_id="CWE-200",
                             cve_id=None,
+                            scanner_name=self.scanner_name,
+                            scanned_at=ts,
+                            references=[
+                                "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/01-Conduct_Search_Engine_Discovery_Reconnaissance_for_Information_Leakage",
+                            ],
                             is_confirmed=True,
                             validation_status="Confirmed Observation",
                         )
                     )
         except Exception:
-            # Non-blocking probe; continue without error
             pass
 
-    def _check_security_txt(self, host: str, port: int, is_https: bool, findings: List[VulnerabilityFinding]):
+    def _check_security_txt(self, host: str, port: int, is_https: bool, findings: List[VulnerabilityFinding], now: Optional[str] = None):
+        ts = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
         scheme = "https" if is_https else "http"
         port_suffix = f":{port}" if (is_https and port != 443) or (not is_https and port != 80) else ""
         sectxt_url = f"{scheme}://{host}{port_suffix}/.well-known/security.txt"
@@ -660,11 +937,16 @@ class EvidenceBasedScanner:
                         ),
                         potential_impact="Security researchers discovering vulnerabilities lack an official, cryptographically verified reporting channel (RFC 9116).",
                         remediation="Publish a valid RFC 9116 security.txt file at /.well-known/security.txt with Contact and Expires directives.",
+                        cwe_id="CWE-1059",
                         cve_id=None,
+                        scanner_name=self.scanner_name,
+                        scanned_at=ts,
+                        references=[
+                            "https://www.rfc-editor.org/rfc/rfc9116",
+                        ],
                         is_confirmed=True,
                         validation_status="Informational Observation",
                     )
                 )
         except Exception:
-            # Non-blocking probe; continue
             pass
