@@ -7,10 +7,10 @@ import { useAppState } from "@/components/app/app-state"
 import { Panel } from "@/components/app/panel"
 import { DEFAULT_BUDGET, investmentOptions } from "@/lib/investments"
 import { optimizeBudget } from "@/lib/optimizer"
-import { formatINR } from "@/lib/format"
+import { formatCurrency } from "@/lib/format"
 
 export function TopRecommendations() {
-  const { dataset, navigate } = useAppState()
+  const { dataset, navigate, currency } = useAppState()
   const result = useMemo(() => optimizeBudget(dataset, investmentOptions, DEFAULT_BUDGET), [dataset])
   const picks = result.insights
     .filter((i) => i.selected)
@@ -19,7 +19,7 @@ export function TopRecommendations() {
   return (
     <Panel
       title="Top recommendations"
-      description={`Optimal plan within the default ${formatINR(DEFAULT_BUDGET)} budget.`}
+      description={`Optimal plan within the default ${formatCurrency(DEFAULT_BUDGET, currency)} budget.`}
       action={
         <Button variant="ghost" size="sm" onClick={() => navigate("investments")}>
           Optimizer
@@ -37,7 +37,7 @@ export function TopRecommendations() {
             <div className="min-w-0 flex-1">
               <p className="text-sm text-foreground">{p.option.name}</p>
               <p className="text-xs text-muted-foreground">
-                {formatINR(p.option.cost)} · {p.option.effort} effort · {p.coverage} assets
+                {formatCurrency(p.option.cost, currency)} · {p.option.effort} effort · {p.coverage} assets
               </p>
             </div>
             <span className="font-mono text-xs tabular-nums text-success">

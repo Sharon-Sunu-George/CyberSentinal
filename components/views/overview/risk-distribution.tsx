@@ -14,30 +14,41 @@ const CATEGORIES: { key: RiskCategory; color: string }[] = [
 ]
 
 export function RiskDistribution() {
-  const { assessment } = useAppState()
+  const { assessment, activeReport } = useAppState()
 
-  // Calculate asset counts from current asset inventory and category thresholds
-  const data = useMemo(
-    () =>
-      CATEGORIES.map((c) => ({
-        category: c.key,
-        color: c.color,
-        count: assessment.assetRisks.filter((r) => r.category === c.key).length,
-      })),
-    [assessment.assetRisks],
-  )
+  // Calculate counts from active scanner report or current asset inventory
+  const data = useMemo(() => {
+    if (activeReport) {
+      return [
+        { category: "Critical" as RiskCategory, color: "var(--destructive)", count: activeReport.summary.critical },
+        { category: "High" as RiskCategory, color: "var(--high)", count: activeReport.summary.high },
+        { category: "Medium" as RiskCategory, color: "var(--warning)", count: activeReport.summary.medium },
+        { category: "Low" as RiskCategory, color: "var(--success)", count: activeReport.summary.low },
+      ]
+    }
+    return CATEGORIES.map((c) => ({
+      category: c.key,
+      color: c.color,
+      count: assessment.assetRisks.filter((r) => r.category === c.key).length,
+    }))
+  }, [assessment.assetRisks, activeReport])
 
-  const totalAssets = assessment.assetRisks.length
+  const totalCount = activeReport ? activeReport.summary.total_findings : assessment.assetRisks.length
+  const labelType = activeReport ? "findings" : "assets"
 
   return (
     <Panel
-      title="Asset Risk Distribution"
-      description={`${totalAssets} monitored assets grouped by risk level`}
+      title={activeReport ? "Report Severity Breakdown" : "Asset Risk Distribution"}
+      description={
+        activeReport
+          ? `${totalCount} itemized findings from ${activeReport.report_id}`
+          : `${totalCount} monitored assets grouped by risk level`
+      }
     >
       <div
         className="h-44"
         role="img"
-        aria-label={`Asset risk distribution: ${data.map((d) => `${d.category}: ${d.count}`).join(", ")} (${totalAssets} total assets)`}
+        aria-label={`Asset risk distribution: ${data.map((d) => `${d.category}: ${d.count}`).join(", ")} (${totalCount} total ${labelType})`}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} layout="vertical" margin={{ left: 0, right: 16, top: 4, bottom: 4 }}>

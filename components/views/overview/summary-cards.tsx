@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils"
 import { useAppState } from "@/components/app/app-state"
 import { LevelBadge, scoreBarColor, scoreColor } from "@/components/app/badges"
 import { formatCurrency } from "@/lib/format"
+import type { CurrencyCode } from "@/lib/types"
 
 function Delta({ value, invert = false }: { value: number; invert?: boolean }) {
   if (value === 0) return <span className="text-muted-foreground">no change</span>
@@ -15,14 +16,14 @@ function Delta({ value, invert = false }: { value: number; invert?: boolean }) {
   )
 }
 
-function DeltaCurrency({ current, previous }: { current: number; previous?: number }) {
+function DeltaCurrency({ current, previous, currency }: { current: number; previous?: number; currency?: CurrencyCode }) {
   if (previous === undefined) return <span className="text-muted-foreground">Baseline quantified</span>
   const diff = current - previous
   if (diff === 0) return <span className="text-muted-foreground">no change since last run</span>
   return (
     <span className={diff > 0 ? "text-destructive" : "text-success"}>
       {diff > 0 ? "+" : ""}
-      {formatCurrency(diff)} since last run
+      {formatCurrency(diff, currency)} since last run
     </span>
   )
 }
@@ -51,7 +52,7 @@ function Card({
 }
 
 export function SummaryCards() {
-  const { assessment: a, previousAssessment: p } = useAppState()
+  const { assessment: a, previousAssessment: p, activeReport, currency } = useAppState()
   const b = a.backendResult
   const pb = p?.backendResult
 
@@ -84,15 +85,16 @@ export function SummaryCards() {
                   <DeltaCurrency
                     current={b.metrics.annual_loss_expectancy}
                     previous={pb?.metrics.annual_loss_expectancy}
+                    currency={currency}
                   />
                   <span className="text-[11px] text-muted-foreground">
-                    SLE: {formatCurrency(b.metrics.single_loss_expectancy)} · LEF: {b.metrics.loss_event_frequency}/yr
+                    SLE: {formatCurrency(b.metrics.single_loss_expectancy, currency)} · LEF: {b.metrics.loss_event_frequency}/yr
                   </span>
                 </div>
               }
             >
               <span className="font-mono text-3xl font-bold tabular-nums text-destructive">
-                {formatCurrency(b.metrics.annual_loss_expectancy)}
+                {formatCurrency(b.metrics.annual_loss_expectancy, currency)}
               </span>
               <span className="text-xs text-muted-foreground">/yr</span>
             </Card>
@@ -108,7 +110,7 @@ export function SummaryCards() {
             >
               <span className="font-mono text-3xl font-bold tabular-nums text-foreground">
                 {b.metrics.mitigated_annual_loss_expectancy != null
-                  ? formatCurrency(b.metrics.mitigated_annual_loss_expectancy)
+                  ? formatCurrency(b.metrics.mitigated_annual_loss_expectancy, currency)
                   : "—"}
               </span>
               <span className="text-xs text-muted-foreground">/yr</span>
@@ -125,7 +127,7 @@ export function SummaryCards() {
             >
               <span className="font-mono text-3xl font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
                 {b.metrics.annual_risk_reduction != null
-                  ? `-${formatCurrency(b.metrics.annual_risk_reduction)}`
+                  ? formatCurrency(b.metrics.annual_risk_reduction, currency)
                   : "—"}
               </span>
               <span className="text-xs text-muted-foreground">/yr</span>
@@ -165,7 +167,13 @@ export function SummaryCards() {
               <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
                 <div className={cn("h-full rounded-full", scoreBarColor(a.overallScore))} style={{ width: `${a.overallScore}%` }} />
               </div>
-              {p ? <Delta value={a.overallScore - p.overallScore} /> : <span className="text-muted-foreground">Baseline assessment</span>}
+              {activeReport ? (
+                <span className="text-primary font-medium">Derived from {activeReport.report_id} findings</span>
+              ) : p ? (
+                <Delta value={a.overallScore - p.overallScore} />
+              ) : (
+                <span className="text-muted-foreground">Baseline assessment</span>
+              )}
             </div>
           }
         >
@@ -176,14 +184,30 @@ export function SummaryCards() {
         <Card
           label="Critical assets"
           icon={Server}
-          footer={<span className="text-muted-foreground">Business criticality: Critical</span>}
+          footer={
+            activeReport ? (
+              <span className="text-muted-foreground truncate max-w-full">Target: {activeReport.target}</span>
+            ) : (
+              <span className="text-muted-foreground">Business criticality: Critical</span>
+            )
+          }
         >
           <span className="font-mono text-3xl font-semibold tabular-nums text-foreground">{a.criticalAssetCount}</span>
         </Card>
         <Card
           label="Open vulnerabilities"
           icon={Bug}
-          footer={p ? <Delta value={a.openVulnerabilityCount - p.openVulnerabilityCount} /> : <span className="text-muted-foreground">Across all monitored assets</span>}
+          footer={
+            activeReport ? (
+              <span className="text-primary font-medium">
+                {activeReport.summary.critical} Crit · {activeReport.summary.high} High · {activeReport.summary.medium} Med · {activeReport.summary.low} Low
+              </span>
+            ) : p ? (
+              <Delta value={a.openVulnerabilityCount - p.openVulnerabilityCount} />
+            ) : (
+              <span className="text-muted-foreground">Across all monitored assets</span>
+            )
+          }
         >
           <span className="font-mono text-3xl font-semibold tabular-nums text-foreground">{a.openVulnerabilityCount}</span>
         </Card>

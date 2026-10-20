@@ -3,3 +3,10 @@ uvicorn[standard]
 pydantic-settings
 python-dotenv
 playwright>=1.40.0
+pypdf
+python-docx
+pillow
+pytesseract
+winocr
+python-multipart
+httpx
