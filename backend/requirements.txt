@@ -9,3 +9,4 @@ pytesseract
 winocr
 python-multipart
 httpx
+playwright>=1.40.0

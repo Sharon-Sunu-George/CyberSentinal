@@ -12,6 +12,7 @@ Covers:
 - FastAPI endpoint contracts and error boundaries.
 """
 
+import os
 import socket
 import unittest
 from unittest.mock import MagicMock, patch
@@ -363,6 +364,239 @@ class TestEvidenceBasedScanner(unittest.TestCase):
         high_or_crit = [f for f in findings if f.severity in ("Critical", "High", "Medium")]
         self.assertEqual(len(high_or_crit), 0)
 
+    def test_http_200_missing_headers_populates_evidence(self):
+        """Tests that a standard HTTP 200 response missing security headers accurately generates evidence-backed findings."""
+        mock_client = MagicMock(spec=SafeHttpClient)
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://app.example.com/",
+            status_code=200,
+            headers={
+                "Server": "CustomApp/1.0",
+                "Content-Type": "text/html; charset=utf-8",
+            },
+            body_text="<html><body>Hello World</body></html>",
+            remote_ip="93.184.216.34",
+            was_https=True,
+            requested_url="https://app.example.com/",
+            final_url="https://app.example.com/",
+        )
+
+        scanner = EvidenceBasedScanner(client=mock_client)
+        findings, meta = scanner.scan("https://app.example.com/")
+
+        self.assertFalse(meta.get("is_inconclusive", False))
+        self.assertFalse(meta.get("allows_retry", False))
+
+        finding_ids = [f.id for f in findings]
+        self.assertIn("VULN-TLS-MISSING-HSTS", finding_ids)
+        self.assertIn("VULN-SEC-HDR-NO-CSP", finding_ids)
+        self.assertIn("VULN-SEC-HDR-NO-NOSNIFF", finding_ids)
+        self.assertIn("VULN-SEC-HDR-NO-XFO", finding_ids)
+        self.assertIn("VULN-SEC-HDR-NO-REFERRER", finding_ids)
+        self.assertIn("VULN-SEC-HDR-NO-PERMISSIONS", finding_ids)
+
+        csp_f = next(f for f in findings if f.id == "VULN-SEC-HDR-NO-CSP")
+        self.assertEqual(csp_f.evidence.status_code, 200)
+        self.assertEqual(csp_f.evidence.check_result, "Potential risk")
+        self.assertTrue(csp_f.evidence.is_inferred)
+        self.assertIn("absence of the Content-Security-Policy header", csp_f.evidence.confidence_reason)
+
+    def test_http_502_proxy_response_marked_inconclusive_without_header_findings(self):
+        """Tests that HTTP 502 Bad Gateway responses are marked inconclusive and do not report missing headers."""
+        mock_client = MagicMock(spec=SafeHttpClient)
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://app.example.com/",
+            status_code=502,
+            headers={
+                "Server": "cloudflare",
+                "CF-RAY": "8234abcd1234-IAD",
+                "Content-Type": "text/html",
+            },
+            body_text="<html><head><title>502 Bad Gateway</title></head><body>Cloudflare Bad Gateway</body></html>",
+            remote_ip="104.21.5.12",
+            was_https=True,
+            requested_url="https://app.example.com/",
+            final_url="https://app.example.com/",
+        )
+
+        scanner = EvidenceBasedScanner(client=mock_client)
+        findings, meta = scanner.scan("https://app.example.com/")
+
+        self.assertTrue(meta["is_inconclusive"])
+        self.assertTrue(meta["allows_retry"])
+        self.assertEqual(len(findings), 1)
+
+        gateway_f = findings[0]
+        self.assertEqual(gateway_f.id, "VULN-SCAN-GATEWAY-PROXY-ERROR")
+        self.assertEqual(gateway_f.validation_status, "Inconclusive")
+        self.assertEqual(gateway_f.evidence.check_result, "Inconclusive")
+        self.assertIn("Cloudflare Gateway Error (HTTP 502)", gateway_f.title)
+        self.assertEqual(gateway_f.evidence.status_code, 502)
+
+        # Missing headers MUST NOT be flagged
+        self.assertNotIn("VULN-SEC-HDR-NO-CSP", [f.id for f in findings])
+        self.assertNotIn("VULN-TLS-MISSING-HSTS", [f.id for f in findings])
+
+    def test_connection_failure_records_scan_error(self):
+        """Tests that socket/connection timeout generates a clear Scan Error finding with retry allowed."""
+        mock_client = MagicMock(spec=SafeHttpClient)
+        mock_client.request.side_effect = socket.timeout("Timed out connecting to target port 443")
+
+        scanner = EvidenceBasedScanner(client=mock_client)
+        findings, meta = scanner.scan("https://unreachable.example.com/")
+
+        self.assertTrue(meta["is_inconclusive"])
+        self.assertTrue(meta["allows_retry"])
+        self.assertEqual(len(findings), 1)
+
+        err_f = findings[0]
+        self.assertEqual(err_f.id, "VULN-SCAN-CONNECTION-FAILED")
+        self.assertEqual(err_f.validation_status, "Scan error")
+        self.assertEqual(err_f.evidence.check_result, "Scan error")
+        self.assertIn("Timed out", err_f.evidence.raw_snippet)
+
+    def test_redirect_records_requested_and_final_urls(self):
+        """Tests that SafeHttpClient and SafeHttpResponse accurately preserve the requested and final URLs after redirection."""
+        mock_client = MagicMock(spec=SafeHttpClient)
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/welcome",
+            status_code=200,
+            headers={
+                "Strict-Transport-Security": "max-age=31536000",
+                "Content-Security-Policy": "default-src 'self'",
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+            },
+            body_text="<html><body>Welcome</body></html>",
+            remote_ip="93.184.216.34",
+            was_https=True,
+            requested_url="https://example.com/",
+            final_url="https://example.com/welcome",
+            redirect_chain=[{"from_url": "https://example.com/", "to_url": "https://example.com/welcome", "status_code": 302}],
+        )
+
+        scanner = EvidenceBasedScanner(client=mock_client)
+        findings, meta = scanner.scan("https://example.com/")
+
+        self.assertEqual(meta["requested_url"], "https://example.com/")
+        self.assertEqual(meta["final_url"], "https://example.com/welcome")
+
+    def test_hsts_evaluated_only_on_https_responses(self):
+        """Tests that HSTS is NOT reported as missing for plain HTTP responses (RFC 6797)."""
+        scanner = EvidenceBasedScanner(client=MagicMock(spec=SafeHttpClient))
+        findings = []
+
+        http_resp = SafeHttpResponse(
+            url="http://example.com/",
+            status_code=200,
+            headers={},
+            body_text="",
+            remote_ip="93.184.216.34",
+            was_https=False,
+            requested_url="http://example.com/",
+            final_url="http://example.com/",
+        )
+        scanner._check_transport_security(http_resp, findings)
+
+        # Cleartext HTTP is flagged, but Missing HSTS is NOT flagged on HTTP
+        self.assertTrue(any(f.id == "VULN-TLS-NO-HTTPS" for f in findings))
+        self.assertFalse(any(f.id == "VULN-TLS-MISSING-HSTS" for f in findings))
+
+        # Over HTTPS without HSTS: Missing HSTS IS flagged
+        findings_https = []
+        https_resp = SafeHttpResponse(
+            url="https://example.com/",
+            status_code=200,
+            headers={},
+            body_text="",
+            remote_ip="93.184.216.34",
+            was_https=True,
+            requested_url="https://example.com/",
+            final_url="https://example.com/",
+        )
+        scanner._check_transport_security(https_resp, findings_https)
+        self.assertTrue(any(f.id == "VULN-TLS-MISSING-HSTS" for f in findings_https))
+
+    def test_csp_frame_ancestors_mitigates_clickjacking(self):
+        """Tests that CSP frame-ancestors mitigates clickjacking even when X-Frame-Options is missing."""
+        scanner = EvidenceBasedScanner(client=MagicMock(spec=SafeHttpClient))
+        findings = []
+
+        resp = SafeHttpResponse(
+            url="https://example.com/",
+            status_code=200,
+            headers={"Content-Security-Policy": "frame-ancestors 'self'"},
+            body_text="",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+        scanner._check_security_headers(resp, findings)
+
+        self.assertFalse(any(f.id == "VULN-SEC-HDR-NO-XFO" for f in findings))
+
+    def test_security_txt_response_variations(self):
+        """Tests security.txt handling for 200 (valid & invalid format), 404 (missing), and 403 (inaccessible)."""
+        mock_client = MagicMock(spec=SafeHttpClient)
+        scanner = EvidenceBasedScanner(client=mock_client)
+
+        # 1. 200 with valid Contact: directive -> Valid RFC 9116, no finding
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.well-known/security.txt",
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            body_text="Contact: mailto:security@example.com\nExpires: 2027-12-31T23:59:59.000Z\n",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+        f_valid = []
+        scanner._check_security_txt("example.com", 443, True, f_valid)
+        self.assertEqual(len(f_valid), 0)
+
+        # 2. 200 with HTML or missing Contact -> Invalid RFC 9116 format
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.well-known/security.txt",
+            status_code=200,
+            headers={"Content-Type": "text/html"},
+            body_text="<html><body>Welcome to our website</body></html>",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+        f_invalid = []
+        scanner._check_security_txt("example.com", 443, True, f_invalid)
+        self.assertEqual(len(f_invalid), 1)
+        self.assertEqual(f_invalid[0].id, "VULN-BEST-PRACTICE-INVALID-SECURITY-TXT")
+        self.assertEqual(f_invalid[0].validation_status, "Confirmed Observation")
+
+        # 3. 404 Not Found -> Missing security.txt
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.well-known/security.txt",
+            status_code=404,
+            headers={},
+            body_text="",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+        f_404 = []
+        scanner._check_security_txt("example.com", 443, True, f_404)
+        self.assertEqual(len(f_404), 1)
+        self.assertEqual(f_404[0].id, "VULN-BEST-PRACTICE-NO-SECURITY-TXT")
+        self.assertEqual(f_404[0].validation_status, "Informational Observation")
+
+        # 4. 403 Forbidden -> Inaccessible security.txt (Inconclusive)
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.well-known/security.txt",
+            status_code=403,
+            headers={},
+            body_text="Forbidden",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+        f_403 = []
+        scanner._check_security_txt("example.com", 443, True, f_403)
+        self.assertEqual(len(f_403), 1)
+        self.assertEqual(f_403[0].id, "VULN-BEST-PRACTICE-INACCESSIBLE-SECURITY-TXT")
+        self.assertEqual(f_403[0].validation_status, "Inconclusive")
+
 
 class TestAttackerAgentService(unittest.TestCase):
     """Verifies AI Agent orchestration, authorization gates, and threat modeling."""
@@ -447,6 +681,418 @@ class TestAttackerEndpoint(unittest.TestCase):
             # Release acquired slots to restore state
             for _ in acquired_slots:
                 scan_limiter.release()
+
+
+class TestLocalDevScanningOptIn(unittest.TestCase):
+    """
+    Verifies the opt-in local development scanning workflow:
+    1. Disabled by default in production.
+    2. Only accepts the strictly configured host & port (e.g. localhost:4000).
+    3. Rejects other internal/private ports, IPs, and cloud metadata.
+    4. Prohibits redirects escaping to other local services or ports.
+    5. Confirms that public-target scanning protections remain active.
+    """
+
+    def test_default_production_blocks_localhost_and_ports(self):
+        # Ensure dev flags are NOT set
+        with patch.dict(os.environ, {"ALLOW_LOCAL_DEV_SCAN": "", "CYBERSENTINEL_ENV": "production"}):
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                normalize_target_url("http://localhost:4000")
+            self.assertIn("prohibited loopback/internal destination", str(ctx.exception))
+
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://127.0.0.1:4000")
+
+    def test_configured_local_target_accepted_in_dev_mode(self):
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            norm_url, host, port, path = normalize_target_url("http://localhost:4000/app")
+            self.assertEqual(norm_url, "http://localhost:4000/app")
+            self.assertEqual(host, "localhost")
+            self.assertEqual(port, 4000)
+
+            # Verification of IP resolution with loopback address
+            mock_addrinfo = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 4000)),
+            ]
+            with patch("socket.getaddrinfo", return_value=mock_addrinfo):
+                ip_str, family = resolve_and_verify_ip("localhost", 4000)
+                self.assertEqual(ip_str, "127.0.0.1")
+                self.assertEqual(family, socket.AF_INET)
+
+    def test_unrelated_local_ports_rejected_even_in_dev_mode(self):
+        # If LOCAL_DEV_TARGET is port 4000, attempt to scan port 8080 or port 22 or port 8010 must be blocked
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            # Port 8010 (our backend)
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://localhost:8010")
+
+            # Port 22 (SSH)
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://localhost:22")
+
+            # Port 8080 (ZAP or internal service)
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://localhost:8080")
+
+    def test_private_networks_and_metadata_blocked_in_dev_mode(self):
+        # Even with local dev scan enabled, other private IPs and cloud metadata MUST remain blocked
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            # Cloud metadata
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://169.254.169.254/latest/meta-data/")
+
+            # RFC1918 Private networks
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://192.168.1.1:4000")
+
+            with self.assertRaises(SSRFProtectionError):
+                normalize_target_url("http://10.0.0.1:4000")
+
+    def test_redirect_from_local_target_cannot_escape_port_or_host(self):
+        # A test application on localhost:4000 attempting to redirect to localhost:8010 or 169.254.169.254
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            mock_client = SafeHttpClient()
+
+            # Attempt redirect to another port (rejected either by SSRF guard or redirect port constraint)
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                mock_client.request(
+                    "http://localhost:8010/internal",
+                    allowed_origin_scheme="http",
+                    allowed_origin_host="localhost",
+                    allowed_origin_port=4000,
+                    redirect_depth=1,
+                )
+            self.assertTrue(
+                "escapes authorized target port scope" in str(ctx.exception)
+                or "prohibited loopback/internal destination" in str(ctx.exception)
+            )
+
+            # Attempt redirect to another host (e.g. cloud metadata)
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                mock_client.request(
+                    "http://169.254.169.254/metadata",
+                    allowed_origin_scheme="http",
+                    allowed_origin_host="localhost",
+                    allowed_origin_port=4000,
+                    redirect_depth=1,
+                )
+            self.assertTrue(
+                "escapes authorized target host" in str(ctx.exception)
+                or "prohibited private" in str(ctx.exception)
+            )
+
+    def test_dns_rebinding_to_private_non_loopback_rejected_in_dev_mode(self):
+        # If localhost:4000 resolved to a non-loopback private IP (e.g. 10.0.0.1 or 192.168.1.5), it must be rejected
+        env_vars = {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }
+        with patch.dict(os.environ, env_vars):
+            mock_addrinfo = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 4000)),
+            ]
+            with patch("socket.getaddrinfo", return_value=mock_addrinfo):
+                with self.assertRaises(SSRFProtectionError) as ctx:
+                    resolve_and_verify_ip("localhost", 4000)
+                self.assertIn("non-loopback prohibited address", str(ctx.exception))
+
+
+class TestAdversarialSecuritySuite(unittest.TestCase):
+    """
+    Adversarial security tests verifying:
+    1. Unusual IP encodings and scheme manipulation
+    2. Socket connection IP pinning (TOCTOU / DNS rebinding defense)
+    3. Server-side authorization enforcement
+    4. Malformed JSON and unexpected parameters
+    5. Redirect chaining attempting to jump to internal destinations
+    """
+
+    def test_unusual_schemes_and_malformed_urls(self):
+        prohibited_urls = [
+            "gopher://127.0.0.1:70/_",
+            "dict://127.0.0.1:2628/",
+            "ldap://127.0.0.1:389/",
+            "file:///etc/shadow",
+            "data:text/html,<script>alert(1)</script>",
+            "javascript:alert(1)",
+            "php://filter/read=convert.base64-encode/resource=index.php",
+            "http://",
+            "https://",
+            "http://:80",
+            "http://user:pass@example.com",
+            "http://example.com:99999",
+            "http://example.com:-1",
+        ]
+        for bad_url in prohibited_urls:
+            with self.subTest(url=bad_url):
+                with self.assertRaises(SSRFProtectionError):
+                    normalize_target_url(bad_url)
+
+    def test_ip_pinning_guarantees_connection_to_verified_ip(self):
+        """
+        Verifies that SafeHttpClient binds the raw TCP socket directly
+        to the validated destination IP string, ensuring that any subsequent
+        DNS changes (rebinding) do not affect the active connection.
+        """
+        client = SafeHttpClient()
+        with patch("app.services.attacker.scanner.resolve_and_verify_ip") as mock_resolve, \
+             patch("socket.socket") as mock_socket_ctor:
+            mock_resolve.return_value = ("93.184.216.34", socket.AF_INET)
+            mock_sock = MagicMock()
+            mock_socket_ctor.return_value = mock_sock
+
+            # Fake minimal HTTP response bytes
+            mock_sock.recv.side_effect = [
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nOK",
+                b"",
+            ]
+
+            resp = client.request("http://example.com/test")
+
+            # Check that socket.connect was called with the exact verified IP, not the hostname
+            mock_sock.connect.assert_called_once_with(("93.184.216.34", 80))
+            self.assertEqual(resp.remote_ip, "93.184.216.34")
+
+    def test_redirect_to_cloud_metadata_blocked(self):
+        """
+        Verifies that a server returning a 302 redirecting to AWS/GCP
+        metadata service (169.254.169.254) is intercepted and aborted.
+        """
+        client = SafeHttpClient()
+        with patch("app.services.attacker.scanner.resolve_and_verify_ip") as mock_resolve, \
+             patch("socket.socket") as mock_socket_ctor:
+            mock_resolve.return_value = ("93.184.216.34", socket.AF_INET)
+            mock_sock = MagicMock()
+            mock_socket_ctor.return_value = mock_sock
+
+            # Mock 302 redirecting to 169.254.169.254
+            mock_sock.recv.side_effect = [
+                b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\n\r\n",
+                b"",
+            ]
+
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                client.request("http://example.com/")
+
+            self.assertTrue(
+                "escapes authorized target host" in str(ctx.exception)
+                or "prohibited" in str(ctx.exception)
+            )
+
+    def test_authorization_strictly_enforced_server_side(self):
+        """Every scan entry point must reject false, missing, or empty authorization."""
+        from app.services.attacker.agent import AttackerAgentService
+
+        service = AttackerAgentService()
+
+        # Missing / false authorization
+        req_false = AttackerScanRequest(target_url="https://example.com", is_authorized=False)
+        with self.assertRaises(TargetAuthorizationError):
+            service.run_scan(req_false)
+
+        # In crawl job manager
+        from app.services.attacker.job_manager import scan_job_manager
+        with self.assertRaises(TargetAuthorizationError):
+            scan_job_manager.create_job(req_false)
+
+    def test_validate_destination_url_enforces_port_restrictions(self):
+        """Crawler URL routing must reject exotic/non-standard ports for public targets."""
+        from app.services.attacker.ssrf_guard import validate_destination_url
+
+        # Ports like 22 (SSH), 25 (SMTP), 3306 (MySQL), 6379 (Redis) must be rejected
+        for bad_port in (22, 25, 3306, 6379, 9200):
+            with self.subTest(port=bad_port):
+                is_safe, reason = validate_destination_url(f"http://example.com:{bad_port}/")
+                self.assertFalse(is_safe)
+                self.assertIn("Forbidden port", reason)
+
+
+class TestTargetClassesAndEvidenceChecks(unittest.TestCase):
+    """Verifies target classes (public, local_dev, private_network) and evidence detection quality."""
+
+    def test_classify_public_target(self):
+        from app.services.attacker.ssrf_guard import classify_target
+        self.assertEqual(classify_target("https://example.com/"), "public")
+        self.assertEqual(classify_target("http://93.184.216.34/"), "public")
+
+    def test_classify_local_dev_target(self):
+        from app.services.attacker.ssrf_guard import classify_target
+        with patch.dict(os.environ, {
+            "ALLOW_LOCAL_DEV_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "LOCAL_DEV_TARGET": "http://localhost:4000",
+        }):
+            self.assertEqual(classify_target("http://localhost:4000"), "local_dev")
+            self.assertEqual(classify_target("http://127.0.0.1:8000"), "local_dev")
+
+    def test_classify_private_network_target(self):
+        from app.services.attacker.ssrf_guard import classify_target
+        self.assertEqual(classify_target("http://192.168.1.50/"), "private_network")
+        self.assertEqual(classify_target("http://10.0.1.100/"), "private_network")
+        self.assertEqual(classify_target("http://service.internal/"), "private_network")
+
+    def test_private_network_denied_by_default(self):
+        """Private networks are denied by default without explicit admin config."""
+        from app.services.attacker.ssrf_guard import normalize_target_url, SSRFProtectionError
+        with patch.dict(os.environ, {"ALLOW_INTERNAL_NETWORK_SCAN": "", "INTERNAL_NETWORK_ALLOWLIST": ""}):
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                normalize_target_url("http://192.168.1.10/")
+            self.assertIn("private network", str(ctx.exception).lower())
+
+    def test_private_network_permitted_with_admin_allowlist(self):
+        """Private networks permitted when explicit administrative allowlist is configured."""
+        from app.services.attacker.ssrf_guard import normalize_target_url, resolve_and_verify_ip
+        with patch.dict(os.environ, {
+            "ALLOW_INTERNAL_NETWORK_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "INTERNAL_NETWORK_ALLOWLIST": "10.0.0.0/8,192.168.1.0/24",
+        }):
+            norm_url, host, port, path = normalize_target_url("http://10.0.5.20:8080/dashboard")
+            self.assertEqual(norm_url, "http://10.0.5.20:8080/dashboard")
+            self.assertEqual(host, "10.0.5.20")
+            self.assertEqual(port, 8080)
+
+            # Resolved IP check
+            ip_str, family = resolve_and_verify_ip("10.0.5.20", 8080)
+            self.assertEqual(ip_str, "10.0.5.20")
+
+    def test_cloud_metadata_denied_under_all_configurations(self):
+        """169.254.169.254 must be blocked even if internal network scanning is allowed."""
+        from app.services.attacker.ssrf_guard import normalize_target_url, SSRFProtectionError
+        with patch.dict(os.environ, {
+            "ALLOW_INTERNAL_NETWORK_SCAN": "true",
+            "CYBERSENTINEL_ENV": "development",
+            "INTERNAL_NETWORK_ALLOWLIST": "169.254.0.0/16,10.0.0.0/8",
+        }):
+            with self.assertRaises(SSRFProtectionError) as ctx:
+                normalize_target_url("http://169.254.169.254/latest/meta-data/")
+            self.assertIn("prohibited", str(ctx.exception).lower())
+
+    def test_sensitive_env_file_detected_with_credentials_redacted(self):
+        """Checks that exposed .env files are detected and all passwords/secrets are redacted."""
+        scanner = EvidenceBasedScanner()
+        mock_client = MagicMock()
+        scanner.client = mock_client
+
+        raw_env_content = (
+            "APP_ENV=production\n"
+            "PORT=3000\n"
+            "DB_USER=postgres\n"
+            "DB_PASSWORD=SuperSecretProductionPassword999!\n"
+            "API_KEY=AIzaSyA_REAL_SECRET_TOKEN_XYZ123456\n"
+            "JWT_SECRET=ultra_confidential_signing_key_abc\n"
+        )
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.env",
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            body_text=raw_env_content,
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_sensitive_files("example.com", 443, True, findings)
+
+        self.assertEqual(len(findings), 1)
+        env_finding = findings[0]
+        self.assertEqual(env_finding.id, "VULN-EXPOSED-ENV-FILE")
+        self.assertEqual(env_finding.severity, "Critical")
+        self.assertEqual(env_finding.confidence, "High")
+
+        # Crucial check: secrets MUST BE REDACTED and never preserved in raw snippet or evidence
+        self.assertNotIn("SuperSecretProductionPassword999!", env_finding.evidence.raw_snippet)
+        self.assertNotIn("AIzaSyA_REAL_SECRET_TOKEN_XYZ123456", env_finding.evidence.raw_snippet)
+        self.assertNotIn("ultra_confidential_signing_key_abc", env_finding.evidence.raw_snippet)
+        self.assertIn("[REDACTED_SECRET]", env_finding.evidence.raw_snippet)
+
+    def test_sensitive_env_file_custom_404_html_rejected(self):
+        """A custom 404 HTML error page on /.env must not produce a false positive."""
+        scanner = EvidenceBasedScanner()
+        mock_client = MagicMock()
+        scanner.client = mock_client
+
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.env",
+            status_code=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body_text="<!DOCTYPE html><html><head><title>Page Not Found</title></head><body><h1>404 Not Found</h1></body></html>",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_sensitive_files("example.com", 443, True, findings)
+        self.assertEqual(len(findings), 0)
+
+    def test_sensitive_git_head_detected(self):
+        """A genuine .git/HEAD file returns confirmed finding."""
+        scanner = EvidenceBasedScanner()
+        mock_client = MagicMock()
+        scanner.client = mock_client
+
+        mock_client.request.return_value = SafeHttpResponse(
+            url="https://example.com/.git/HEAD",
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            body_text="ref: refs/heads/main\n",
+            remote_ip="93.184.216.34",
+            was_https=True,
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_sensitive_files("example.com", 443, True, findings)
+        self.assertEqual(len(findings), 1)
+        git_finding = findings[0]
+        self.assertEqual(git_finding.id, "VULN-EXPOSED-GIT-HEAD")
+        self.assertEqual(git_finding.severity, "High")
+
+    def test_redirect_downgrade_detected(self):
+        """Insecure HTTPS to HTTP redirection hop is flagged as VULN-REDIRECT-HTTPS-DOWNGRADE."""
+        scanner = EvidenceBasedScanner()
+        resp = SafeHttpResponse(
+            url="http://example.com/login",
+            status_code=200,
+            headers={},
+            body_text="Welcome",
+            remote_ip="93.184.216.34",
+            was_https=False,
+            requested_url="https://example.com/",
+            redirect_chain=[
+                {
+                    "from_url": "https://example.com/",
+                    "to_url": "http://example.com/login",
+                    "status_code": 302,
+                }
+            ],
+        )
+
+        findings: List[VulnerabilityFinding] = []
+        scanner._check_suspicious_redirects(resp, findings)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].id, "VULN-REDIRECT-HTTPS-DOWNGRADE")
+        self.assertEqual(findings[0].severity, "High")
 
 
 if __name__ == "__main__":

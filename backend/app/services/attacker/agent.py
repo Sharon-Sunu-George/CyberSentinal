@@ -1,8 +1,8 @@
 """
-Attacker AI Agent Service for CyberQuant.
+Attacker AI Agent Service for CyberSentinal.
 Orchestrates evidence-based security scanning and deterministic adversarial reasoning.
 Strictly separates verified empirical findings from modeled/inferred attack scenarios,
-and formats structured outputs ready for the future Defender Agent.
+and formats structured outputs ready for the Defender Agent.
 """
 
 import datetime
@@ -22,6 +22,7 @@ from app.services.attacker.ssrf_guard import (
     TargetAuthorizationError,
     SSRFProtectionError,
 )
+from app.services.storage import save_scan_record, get_scan_record, update_scan_status
 
 
 class AttackerAgentService:
@@ -34,7 +35,7 @@ class AttackerAgentService:
     def __init__(self, scanner: Optional[EvidenceBasedScanner] = None):
         self.scanner = scanner or EvidenceBasedScanner(SafeHttpClient())
 
-    def run_scan(self, request: AttackerScanRequest) -> AttackerScanResponse:
+    def run_scan(self, request: AttackerScanRequest, scan_id: Optional[str] = None) -> AttackerScanResponse:
         # Enforce authorization
         if not request.is_authorized:
             raise TargetAuthorizationError(
@@ -44,33 +45,86 @@ class AttackerAgentService:
         # Normalize and validate target URL
         normalized_url, hostname, port, path = normalize_target_url(request.target_url)
 
+        # Generate or reuse scan_id
+        actual_scan_id = scan_id or f"scan-{uuid.uuid4().hex[:10]}"
+        scanned_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        # Update status to running
+        save_scan_record({
+            "scan_id": actual_scan_id,
+            "target_url": request.target_url,
+            "normalized_url": normalized_url,
+            "scanned_at": scanned_at,
+            "status": "running",
+            "scope_limitations": "Safe passive audit in progress.",
+            "scanner_info": {"engine": self.scanner.scanner_name},
+        })
+
         # Execute bounded, evidence-based scan
-        findings, scan_meta = self.scanner.scan(normalized_url)
+        try:
+            findings, scan_meta = self.scanner.scan(normalized_url)
+        except Exception as e:
+            update_scan_status(actual_scan_id, "failed")
+            raise
 
         # Compute summary metrics
         summary = self._compute_summary(findings)
 
+        # Honest disclaimer if zero findings are detected
+        zero_disclaimer = None
+        if len(findings) == 0:
+            zero_disclaimer = (
+                "No vulnerabilities were detected by this passive assessment. "
+                "Important: Zero findings does not imply that the target website is 100% secure. "
+                "Comprehensive security requires deep authenticated testing, business logic reviews, and application code audits."
+            )
+
         # Generate deterministic inferred attack paths derived strictly from observed findings
         inferred_scenarios = self._derive_inferred_attack_scenarios(findings, normalized_url)
 
-        # Structure defender handover packet for the future Defender Agent
+        # Structure defender handover packet for the Defender Agent
         defender_handover = self._build_defender_handover(findings, normalized_url, summary)
 
-        scan_id = f"scan-{uuid.uuid4().hex[:10]}"
-        scanned_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        target_class = request.target_class or scan_meta.get("target_class", "public")
 
-        return AttackerScanResponse(
-            scan_id=scan_id,
+        response = AttackerScanResponse(
+            scan_id=actual_scan_id,
             target_url=request.target_url,
             normalized_url=normalized_url,
             scanned_at=scanned_at,
-            status="completed",
+            status="completed" if not scan_meta.get("is_inconclusive") else "inconclusive",
+            target_class=target_class,
             target_ip=scan_meta.get("target_ip"),
+            scanner_info=scan_meta.get("scanner_info", {}),
+            scope_limitations=scan_meta.get("scope_limitations", ""),
+            zero_findings_disclaimer=zero_disclaimer,
+            is_inconclusive=scan_meta.get("is_inconclusive", False),
+            allows_retry=scan_meta.get("allows_retry", False),
             summary=summary,
             findings=findings,
             inferred_attack_scenarios=inferred_scenarios,
             defender_handover=defender_handover,
         )
+
+        # Persist completed scan record
+        save_scan_record({
+            "scan_id": actual_scan_id,
+            "target_url": request.target_url,
+            "normalized_url": normalized_url,
+            "target_class": target_class,
+            "scanned_at": scanned_at,
+            "status": "completed" if not scan_meta.get("is_inconclusive") else "inconclusive",
+            "target_ip": scan_meta.get("target_ip"),
+            "scope_limitations": scan_meta.get("scope_limitations", ""),
+            "scanner_info": scan_meta.get("scanner_info", {}),
+            "is_inconclusive": scan_meta.get("is_inconclusive", False),
+            "allows_retry": scan_meta.get("allows_retry", False),
+            "summary": summary.model_dump(),
+            "findings": [f.model_dump() for f in findings],
+            "inferred_attack_scenarios": [s.model_dump() for s in inferred_scenarios],
+        })
+
+        return response
 
     @staticmethod
     def _compute_summary(findings: List[VulnerabilityFinding]) -> AttackerScanSummary:
@@ -95,57 +149,54 @@ class AttackerAgentService:
     def _derive_inferred_attack_scenarios(
         findings: List[VulnerabilityFinding], target_url: str
     ) -> List[InferredAttackScenario]:
-        """
-        Derives adversarial threat scenarios strictly based on actual observed findings.
-        Every scenario is explicitly marked as 'Inferred Hypothesis' to distinguish
-        threat modeling from raw empirical findings.
-        """
         scenarios: List[InferredAttackScenario] = []
-        finding_ids = {f.id for f in findings}
 
-        # Scenario 1: Transport Insecurity / MITM
-        if "VULN-TLS-NO-HTTPS" in finding_ids or "VULN-TLS-MISSING-HSTS" in finding_ids:
+        # Scenario 1: Man-In-The-Middle / Transport Interception
+        has_tls_issue = any(f.category == "Transport Security" for f in findings)
+        if has_tls_issue:
             scenarios.append(
                 InferredAttackScenario(
-                    scenario_title="Adversary In-Path Interception & SSL Stripping",
-                    adversary_technique="T1040 - Network Sniffing & T1557 - Adversary-in-the-Middle",
+                    scenario_title="Cleartext Interception & Credential Sniffing (MITM)",
+                    adversary_technique="T1040 - Network Sniffing",
                     preconditions=[
-                        "Adversary shares a local network or controls an upstream routing node.",
-                        "Target does not enforce strict transport encryption (HSTS or HTTPS).",
+                        "Target does not enforce end-to-end HTTPS or lacks HSTS preloading.",
+                        "Adversary shares an unencrypted local network (e.g. public Wi-Fi) or controls intermediate router.",
                     ],
                     modeled_chain=[
-                        "Step 1: Adversary intercepts cleartext ARP or DNS requests to target host.",
-                        "Step 2: Adversary strips TLS upgrade or observes cleartext HTTP requests.",
-                        "Step 3: Adversary harvests session cookies and unencrypted form submissions.",
+                        "Step 1: Adversary positions between client and gateway (ARP spoofing / rogue AP).",
+                        "Step 2: Downgrades user connection to unencrypted HTTP via SSL stripping.",
+                        "Step 3: Captures unencrypted session cookies, auth tokens, and POST data.",
                     ],
-                    potential_impact="Complete loss of confidentiality for credentials and sensitive data in transit.",
+                    potential_impact="Complete loss of confidentiality for all credentials and session state transmitted in cleartext.",
                     confidence="Inferred Hypothesis (Model-Modeled)",
                 )
             )
 
-        # Scenario 2: UI Redressing / Clickjacking
-        if "VULN-SEC-HDR-NO-XFO" in finding_ids:
+        # Scenario 2: Clickjacking / Frame Manipulation
+        has_clickjack = any(f.id == "VULN-SEC-HDR-NO-XFO" for f in findings)
+        if has_clickjack:
             scenarios.append(
                 InferredAttackScenario(
-                    scenario_title="Cross-Origin Framing & Clickjacking Exploitation",
-                    adversary_technique="T1189 - Drive-by Compromise",
+                    scenario_title="Unauthorized Action Execution via Clickjacking Framing",
+                    adversary_technique="T1204 - User Execution",
                     preconditions=[
-                        "Web application allows cross-origin framing without X-Frame-Options or CSP frame-ancestors.",
-                        "Target website contains authenticated state-changing actions.",
+                        "Target application fails to declare X-Frame-Options or CSP frame-ancestors.",
+                        "User is logged into target in their active browser session.",
                     ],
                     modeled_chain=[
-                        "Step 1: Attacker constructs phishing landing page embedding target in an opaque iframe.",
-                        "Step 2: Attacker overlays misleading UI buttons directly above legitimate target action triggers.",
-                        "Step 3: Authenticated user inadvertently executes state changes on the target application.",
+                        "Step 1: Adversary crafts a decoy website containing an invisible iframe of target.",
+                        "Step 2: Adversary lures victim to click buttons perfectly aligned with target interface buttons.",
+                        "Step 3: Victim inadvertently executes state-changing actions (e.g. account transfer, delete resource).",
                     ],
-                    potential_impact="Unauthorized state changes executed on behalf of authenticated victims.",
+                    potential_impact="Unauthorized state changes executed on behalf of authenticated users without their knowledge.",
                     confidence="Inferred Hypothesis (Model-Modeled)",
                 )
             )
 
-        # Scenario 3: Cookie Stealing via XSS amplification
-        has_cookie_issues = any(f.category == "Session Management" for f in findings)
-        if has_cookie_issues and "VULN-SEC-HDR-NO-CSP" in finding_ids:
+        # Scenario 3: Cross-Site Scripting (XSS) Amplification
+        has_no_csp = any(f.id == "VULN-SEC-HDR-NO-CSP" for f in findings)
+        has_cookie_no_httponly = any("NO-HTTPONLY" in f.id for f in findings)
+        if has_no_csp and has_cookie_no_httponly:
             scenarios.append(
                 InferredAttackScenario(
                     scenario_title="Session Token Exfiltration via Script Injection",
@@ -191,10 +242,6 @@ class AttackerAgentService:
     def _build_defender_handover(
         findings: List[VulnerabilityFinding], target_url: str, summary: AttackerScanSummary
     ) -> Dict[str, Any]:
-        """
-        Structures empirical scan outputs so the future Defender Agent can immediately
-        prescribe and simulate targeted countermeasures.
-        """
         recommended_controls = set()
         for f in findings:
             if f.category == "Transport Security":
@@ -207,6 +254,8 @@ class AttackerAgentService:
                 recommended_controls.add("suppress_server_banners")
             elif f.category == "Outdated Software":
                 recommended_controls.add("upgrade_vulnerable_components")
+            elif f.category == "Access Control":
+                recommended_controls.add("restrict_cors_origins")
 
         return {
             "target_url": target_url,

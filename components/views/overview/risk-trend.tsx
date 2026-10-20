@@ -3,8 +3,9 @@
 import { useMemo } from "react"
 import { CheckCircle2, Info } from "lucide-react"
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
+import { TrendingDown, TrendingUp } from "lucide-react"
 import { useAppState } from "@/components/app/app-state"
-import { DemoTag } from "@/components/app/badges"
+import { DemoTag, LevelBadge, scoreColor } from "@/components/app/badges"
 import { Panel } from "@/components/app/panel"
 
 function formatISTDay(date: Date): string {
@@ -47,16 +48,17 @@ export function RiskTrend({ className }: { className?: string }) {
 
   const first = data[0]?.score ?? assessment.overallScore
   const change = Number((assessment.overallScore - first).toFixed(1))
+  const isUp = change > 0
   const currentDayLabel = data[data.length - 1]?.day || "Today"
 
   return (
     <Panel
       className={className}
-      title={activeReport ? "Risk Posture Progression" : "Seven-day risk trend"}
+      title={activeReport ? "Risk Posture Progression" : "Seven-Day Risk Trend"}
       description={
         activeReport
           ? `Authoritative risk score ${assessment.overallScore}/100 derived from ${activeReport.filename || activeReport.report_id}.`
-          : `Overall risk score ${change >= 0 ? "up" : "down"} ${Math.abs(change)} points across demonstration baseline estate.`
+          : `Official risk score is ${assessment.overallScore}/100 (${isUp ? "+" : ""}${change} pts over 7 days). Reference line marks Critical threshold (80).`
       }
       action={
         <div className="flex flex-wrap items-center gap-2">
@@ -70,13 +72,48 @@ export function RiskTrend({ className }: { className?: string }) {
         </div>
       }
     >
-      <div className="h-56" role="img" aria-label={`Risk trend: ${data.map((d) => `${d.day} ${d.score}`).join(", ")}`}>
+      {/* Visual Header Metrics Banner */}
+      <div className="mb-4 grid grid-cols-3 gap-2 rounded-md border border-border/50 bg-muted/20 p-2.5 text-xs">
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">Current Risk</span>
+          <span className="mt-0.5 font-mono text-sm font-bold text-foreground">
+            {assessment.overallScore}/100
+          </span>
+        </div>
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">7-Day Trajectory</span>
+          <span className="mt-0.5 inline-flex items-center gap-1 font-mono text-xs font-semibold text-foreground">
+            {change === 0 ? (
+              "No net change"
+            ) : (
+              <>
+                {isUp ? (
+                  <TrendingUp className="size-3 text-destructive" />
+                ) : (
+                  <TrendingDown className="size-3 text-success" />
+                )}
+                <span className={isUp ? "text-destructive" : "text-success"}>
+                  {isUp ? "+" : ""}{change} pts
+                </span>
+              </>
+            )}
+          </span>
+        </div>
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">Critical Line</span>
+          <span className="mt-0.5 font-mono text-xs font-semibold text-destructive">
+            ≥ 80 Score
+          </span>
+        </div>
+      </div>
+
+      <div className="h-60 w-full" role="img" aria-label={`Risk trend: ${data.map((d) => `${d.day} ${d.score}`).join(", ")}`}>
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ left: -16, right: 8, top: 8, bottom: 0 }}>
+          <AreaChart data={data} margin={{ left: -16, right: 12, top: 10, bottom: 0 }}>
             <defs>
               <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--high)" stopOpacity={0.25} />
-                <stop offset="100%" stopColor="var(--high)" stopOpacity={0} />
+                <stop offset="0%" stopColor="var(--high)" stopOpacity={0.3} />
+                <stop offset="100%" stopColor="var(--high)" stopOpacity={0.0} />
               </linearGradient>
             </defs>
             <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
@@ -96,11 +133,16 @@ export function RiskTrend({ className }: { className?: string }) {
               y={80}
               stroke="var(--destructive)"
               strokeDasharray="4 4"
-              strokeOpacity={0.6}
-              label={{ value: "Critical", fill: "var(--destructive)", fontSize: 10, position: "insideTopRight" }}
+              strokeOpacity={0.8}
+              label={{
+                value: "Critical (80)",
+                fill: "var(--destructive)",
+                fontSize: 10,
+                position: "insideTopRight",
+              }}
             />
             <Tooltip
-              content={({ active, payload }) => {
+content={({ active, payload }) => {
                 if (!active || !payload || !payload.length) return null
                 const item = payload[0].payload as { day: string; score: number; isSimulated: boolean }
                 return (
@@ -126,11 +168,13 @@ export function RiskTrend({ className }: { className?: string }) {
               type="monotone"
               dataKey="score"
               stroke="var(--high)"
-              strokeWidth={2}
+              strokeWidth={2.5}
               fill="url(#trendFill)"
-              dot={{ r: 3, fill: "var(--high)", strokeWidth: 0 }}
-              activeDot={{ r: 4 }}
-              isAnimationActive={false}
+dot={{ r: 3.5, fill: "var(--high)", strokeWidth: 0 }}
+              activeDot={{ r: 5 }}
+              isAnimationActive={true}
+              animationDuration={600}
+              animationEasing="ease-out"
             />
           </AreaChart>
         </ResponsiveContainer>

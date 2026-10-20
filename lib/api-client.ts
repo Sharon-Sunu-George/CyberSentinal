@@ -271,5 +271,433 @@ export const apiClient = {
     if (!res.ok) throw new Error(`Defense simulation failed: HTTP ${res.status}`)
     return res.json()
   },
+
+  // Real Website Security Assessment (Attacker Agent)
+  async scanWebsite(payload: {
+    target_url: string
+    is_authorized: boolean
+    scanner_mode?: string
+    max_pages?: number
+    max_depth?: number
+    timeout_seconds?: number
+  }): Promise<AttackerScanResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async startCrawl(payload: {
+    target_url: string
+    is_authorized: boolean
+    scanner_mode?: string
+    max_pages?: number
+    max_depth?: number
+    timeout_seconds?: number
+  }): Promise<{ scan_id: string; status: string; target_url: string; message: string }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/crawl`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async getScanProgress(scanId: string): Promise<ScanProgressUpdate> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan/${scanId}/progress`)
+    if (!res.ok) throw new Error(`Failed to load progress: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async getScanPages(scanId: string): Promise<DiscoveredPage[]> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan/${scanId}/pages`)
+    if (!res.ok) throw new Error(`Failed to load pages: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async getScanRecord(scanId: string): Promise<AttackerScanResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan/${scanId}`)
+    if (!res.ok) throw new Error(`Failed to load scan record: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async cancelScan(scanId: string): Promise<{ scan_id: string; status: string; message: string }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan/${scanId}/cancel`, {
+      method: "POST",
+    })
+    if (!res.ok) throw new Error(`Cancel scan failed: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async rescanTarget(scanId: string): Promise<AttackerScanResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scan/${scanId}/rescan`, {
+      method: "POST",
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async getScannerStatus(): Promise<{
+    engine: string
+    active_concurrent_scans: number
+    max_concurrent_capacity: number
+    owasp_zap: {
+      is_available: boolean
+      service_name: string
+      endpoint: string
+      version?: string | null
+      instructions: string
+    }
+    local_dev_scan?: {
+      is_enabled: boolean
+      target?: string | null
+      allowed_host?: string | null
+      allowed_port?: number | null
+    }
+    supported_checks: string[]
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/attacker/scanner-status`)
+    if (!res.ok) throw new Error(`Failed to fetch scanner status: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  // Real Remediation Planning & Budgeting (Defender Agent)
+  async analyzeDefenderBudget(payload: {
+    scan_id?: string
+    target_url: string
+    findings: any[]
+    available_budget: number
+    hourly_rate?: number
+    currency?: string
+    business_criticality?: string
+  }): Promise<DefenderAnalysisResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async updateRemediationStatus(
+    scanId: string,
+    findingId: string,
+    status: string,
+    notes?: string
+  ): Promise<{ scan_id: string; finding_id: string; remediation_status: string; updated: boolean }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/remediation/${scanId}/${findingId}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, notes }),
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async verifyRemediation(
+    scanId: string,
+    findingId: string,
+    targetUrl?: string
+  ): Promise<VerifyRemediationResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/remediation/${scanId}/${findingId}/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_url: targetUrl }),
+    })
+    if (!res.ok) {
+      const errorJson = await res.json().catch(() => null)
+      const detail = errorJson?.detail || (await res.text().catch(() => "Unknown error"))
+      throw new Error(detail)
+    }
+    return res.json()
+  },
+
+  async getRemediationHistory(
+    scanId: string,
+    findingId?: string
+  ): Promise<{
+    scan_id: string
+    finding_id?: string
+    total_events: number
+    history: Array<{
+      id: number
+      scan_id: string
+      finding_id: string
+      old_status: string
+      new_status: string
+      evidence?: any
+      notes?: string
+      changed_at: string
+    }>
+  }> {
+    const query = findingId ? `?finding_id=${encodeURIComponent(findingId)}` : ""
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/remediation/${scanId}/history${query}`)
+    if (!res.ok) throw new Error(`Failed to load remediation history: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async getDefenderPlan(scanId: string): Promise<DefenderAnalysisResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/scans/${scanId}/plan`)
+    if (!res.ok) throw new Error(`Failed to load remediation plan: HTTP ${res.status}`)
+    return res.json()
+  },
+
+  async getDefenderSettings(): Promise<{
+    currencies: string[]
+    default_currency: string
+    default_hourly_rate: number
+    valid_statuses: string[]
+    lifecycle_stages: string[]
+    cost_assumptions: string[]
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/v1/defender/settings`)
+    if (!res.ok) throw new Error(`Failed to fetch defender settings: HTTP ${res.status}`)
+    return res.json()
+  },
+}
+
+export interface FindingEvidence {
+  check_type: string
+  observed_data: Record<string, any>
+  raw_snippet?: string | null
+  status_code?: number | null
+  requested_url?: string | null
+  final_url?: string | null
+  observed_headers?: Record<string, string>
+  check_result?: string | null
+  confidence_reason?: string | null
+  is_inferred?: boolean
+  response_timestamp?: string | null
+}
+
+export interface VulnerabilityFinding {
+  id: string
+  title: string
+  category: string
+  severity: "Critical" | "High" | "Medium" | "Low" | "Info"
+  confidence: "High" | "Medium" | "Low"
+  affected_url_or_component: string
+  evidence: FindingEvidence
+  potential_impact: string
+  remediation: string
+  cwe_id?: string | null
+  cve_id?: string | null
+  scanner_name: string
+  scanned_at?: string | null
+  references: string[]
+  is_confirmed: boolean
+  validation_status: string
+  remediation_status: "Open" | "Planned" | "In Progress" | "Fixed" | "Accepted Risk" | "Verified"
+}
+
+export interface InferredAttackScenario {
+  scenario_title: string
+  adversary_technique: string
+  preconditions: string[]
+  modeled_chain: string[]
+  potential_impact: string
+  confidence: string
+}
+
+export interface DiscoveredForm {
+  action: string
+  method: string
+  input_names: string[]
+}
+
+export interface DiscoveredRequest {
+  url: string
+  method: string
+  resource_type: string
+  status?: number | null
+}
+
+export interface DiscoveredPage {
+  url: string
+  path: string
+  depth: number
+  status_code?: number | null
+  content_type?: string | null
+  title?: string | null
+  query_params: string[]
+  forms: DiscoveredForm[]
+  requests: DiscoveredRequest[]
+  discovery_source: string
+  discovered_at?: string | null
+}
+
+export interface ScanProgressUpdate {
+  scan_id: string
+  status: "queued" | "running" | "completed" | "failed" | "cancelled"
+  pages_discovered: number
+  pages_visited: number
+  requests_completed: number
+  current_url?: string | null
+  current_depth: number
+  findings_count: number
+  progress_percentage: number
+  message: string
+  started_at?: string | null
+  elapsed_seconds: number
+  completed_at?: string | null
+  error?: string | null
+}
+
+export interface AttackerScanSummary {
+  total_findings: number
+  critical_count: number
+  high_count: number
+  medium_count: number
+  low_count: number
+  info_count: number
+  confirmed_count: number
+  pages_discovered?: number
+  pages_visited?: number
+  requests_completed?: number
+}
+
+export interface AttackerScanResponse {
+  scan_id: string
+  target_url: string
+  normalized_url: string
+  scanned_at: string
+  status: string
+  target_class?: string
+  target_ip?: string | null
+  scanner_info: {
+    engine?: string
+    mode?: string
+    zap_integration?: {
+      is_available: boolean
+      service_name: string
+      endpoint: string
+      version?: string | null
+      instructions: string
+    }
+    checks_executed?: string[]
+  }
+  scope_limitations: string
+  zero_findings_disclaimer?: string | null
+  is_inconclusive?: boolean
+  allows_retry?: boolean
+  summary: AttackerScanSummary
+  findings: VulnerabilityFinding[]
+  discovered_pages?: DiscoveredPage[]
+  inferred_attack_scenarios: InferredAttackScenario[]
+  defender_handover: Record<string, any>
+}
+
+export interface RemediationRecommendation {
+  finding_id: string
+  finding_title: string
+  severity: "Critical" | "High" | "Medium" | "Low" | "Info"
+  confidence?: "High" | "Medium" | "Low"
+  category: string
+  cwe_id?: string | null
+  cve_id?: string | null
+  affected_url_or_component: string
+  short_explanation?: string
+  why_it_matters?: string
+  root_cause: string
+  actionable_fix: string
+  recommended_fix?: string
+  implementation_steps: string[]
+  code_snippets: Record<string, string>
+  file_or_config_location?: string
+  implementation_difficulty?: "Easy" | "Moderate" | "Hard"
+  estimated_effort_hours: number
+  hourly_rate: number
+  currency?: string
+  labor_cost: number
+  service_cost: number
+  total_cost: number
+  cost_assumption?: string
+  risk_score: number
+  priority_score?: number
+  priority_explanation?: string
+  projected_risk_reduction: number
+  risk_reduction_expected?: string
+  cost_efficiency: number
+  priority_group: "fix_immediately" | "fix_next" | "defer_or_mitigate"
+  priority_rationale: string
+  deferral_reason?: string | null
+  temporary_mitigation?: string | null
+  dependencies_and_side_effects?: string
+  dependencies: string[]
+  assumptions: string[]
+  confidence_range: string
+  validation_steps?: string[]
+  verification_procedure: string
+  rollback_guidance?: string
+  status: "Not Started" | "In Progress" | "Fixed Pending Verification" | "Verified Fixed" | "Reopened" | "Open" | "Planned" | "Fixed" | "Accepted Risk" | "Verified" | "Needs Verification"
+  remediation_status?: string
+  status_notes?: string | null
+  verification_evidence?: Record<string, any> | null
+}
+
+export interface DefenderAnalysisResponse {
+  analysis_id: string
+  scan_id?: string | null
+  target_url: string
+  currency: string
+  available_budget: number
+  hourly_rate: number
+  total_remediation_cost: number
+  proposed_spending: number
+  remaining_budget: number
+  budget_shortfall: number
+  baseline_risk_score: number
+  projected_residual_risk: number
+  total_risk_reduction_points: number
+  total_risk_reduction_percent: number
+  risk_reduction_per_dollar: number
+  fix_immediately: RemediationRecommendation[]
+  fix_next: RemediationRecommendation[]
+  defer_or_mitigate: RemediationRecommendation[]
+  unbudgeted_high_risk_findings: RemediationRecommendation[]
+  scoring_model_notes: string[]
+  cost_assumptions?: string[]
+  created_at: string
+}
+
+export interface VerifyRemediationResponse {
+  scan_id: string
+  finding_id: string
+  target_url: string
+  previous_status: string
+  new_status: string
+  is_verified: boolean
+  verification_passed: boolean
+  is_inconclusive: boolean
+  evidence_summary: string
+  observed_headers: Record<string, string>
+  observed_status?: number | null
+  verification_timestamp: string
+  message: string
 }
 

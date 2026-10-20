@@ -1,12 +1,12 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import risk, simulation, settings, attacker, reports
+from app.api.v1.endpoints import risk, simulation, settings, attacker, reports, defender
 
 api_router = APIRouter()
 
 # Register risk assessment endpoints under /risk prefix
 api_router.include_router(
-    risk.router, 
-    prefix="/risk", 
+    risk.router,
+    prefix="/risk",
     tags=["Cyber Risk Quantification"]
 )
 
@@ -36,4 +36,11 @@ api_router.include_router(
     reports.router,
     prefix="/reports",
     tags=["Security Report Analysis"]
+)
+
+# Register Defender Agent endpoints under /defender prefix
+api_router.include_router(
+    defender.router,
+    prefix="/defender",
+    tags=["Defender Agent"]
 )

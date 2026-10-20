@@ -5,9 +5,10 @@ link-local, cloud metadata services, and DNS-rebinding attacks.
 """
 
 import ipaddress
+import os
 import socket
 import urllib.parse
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 
 
 class SSRFProtectionError(ValueError):
@@ -18,6 +19,120 @@ class SSRFProtectionError(ValueError):
 class TargetAuthorizationError(ValueError):
     """Raised when target authorization criteria are not met."""
     pass
+
+
+def get_local_dev_target_config() -> Optional[Dict[str, Any]]:
+    """
+    Retrieves the explicitly configured local development test target.
+    Opt-in only: requires ALLOW_LOCAL_DEV_SCAN=true AND CYBERSENTINEL_ENV in ('development', 'test', 'local').
+    The target must match LOCAL_DEV_TARGET (default: 'http://localhost:4000').
+    Returns dict with (scheme, host, port, normalized_target) or None if disabled.
+    """
+    allow_flag = os.getenv("ALLOW_LOCAL_DEV_SCAN", "").strip().lower()
+    env_name = os.getenv("CYBERSENTINEL_ENV", os.getenv("ENVIRONMENT", "production")).strip().lower()
+
+    if allow_flag not in ("true", "1", "yes") or env_name not in ("development", "test", "local"):
+        return None
+
+    raw_target = os.getenv("LOCAL_DEV_TARGET", "http://localhost:4000").strip()
+    if not raw_target:
+        return None
+
+    try:
+        parsed = urllib.parse.urlsplit(raw_target if "://" in raw_target else f"http://{raw_target}")
+        scheme = parsed.scheme.lower() or "http"
+        host = (parsed.hostname or "localhost").lower().strip(".")
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return {
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+            "origin": f"{scheme}://{host}:{port}" if (scheme == "http" and port != 80) or (scheme == "https" and port != 443) else f"{scheme}://{host}",
+        }
+    except Exception:
+        return None
+
+
+def get_internal_network_config() -> Optional[Dict[str, Any]]:
+    """
+    Retrieves administrative configuration for private/internal network assessments.
+    Deny by default: requires ALLOW_INTERNAL_NETWORK_SCAN=true AND CYBERSENTINEL_ENV in ('development', 'test', 'local', 'admin', 'controlled').
+    Requires explicit CIDR allowlist in INTERNAL_NETWORK_ALLOWLIST (e.g. '10.0.0.0/8,192.168.1.0/24').
+    Cloud metadata (169.254.0.0/16, metadata.google.internal, instance-data) is NEVER permitted.
+    """
+    allow_flag = os.getenv("ALLOW_INTERNAL_NETWORK_SCAN", "").strip().lower()
+    env_name = os.getenv("CYBERSENTINEL_ENV", os.getenv("ENVIRONMENT", "production")).strip().lower()
+
+    if allow_flag not in ("true", "1", "yes") or env_name not in ("development", "test", "local", "admin", "controlled"):
+        return None
+
+    raw_allowlist = os.getenv("INTERNAL_NETWORK_ALLOWLIST", "").strip()
+    if not raw_allowlist:
+        return None
+
+    allowed_cidrs: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    metadata_net = ipaddress.ip_network("169.254.0.0/16")
+    for item in raw_allowlist.split(","):
+        cidr_str = item.strip()
+        if not cidr_str:
+            continue
+        try:
+            net = ipaddress.ip_network(cidr_str, strict=False)
+            # Metadata addresses are non-negotiably blocked under all conditions
+            if net.overlaps(metadata_net):
+                continue
+            allowed_cidrs.append(net)
+        except ValueError:
+            continue
+
+    if not allowed_cidrs:
+        return None
+
+    return {
+        "allowed_networks": allowed_cidrs,
+        "is_enabled": True,
+    }
+
+
+def classify_target(raw_url: str) -> str:
+    """
+    Identifies the target category for an input URL:
+    - 'local_dev': matches explicitly authorized local development test target
+    - 'private_network': resolves to or references RFC1918 private / internal address space
+    - 'public': standard external internet web destination
+    """
+    clean_url = raw_url.strip()
+    if not clean_url:
+        return "public"
+
+    try:
+        parsed = urllib.parse.urlsplit(clean_url if "://" in clean_url else f"https://{clean_url}")
+        hostname = (parsed.hostname or "").lower().strip(".")
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+
+        local_cfg = get_local_dev_target_config()
+        if local_cfg and hostname == local_cfg["host"] and port == local_cfg["port"]:
+            return "local_dev"
+
+        if hostname in ("localhost", "127.0.0.1", "::1") or hostname.endswith(".localhost"):
+            return "local_dev"
+
+        for suffix in BLOCKED_HOSTNAME_SUFFIXES:
+            if hostname.endswith(suffix):
+                return "private_network"
+
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            if ip_obj.is_loopback:
+                return "local_dev"
+            if ip_obj.is_private or ip_obj.is_link_local:
+                return "private_network"
+        except ValueError:
+            pass
+
+        return "public"
+    except Exception:
+        return "public"
 
 
 # Disallowed domain suffixes and reserved names
@@ -89,7 +204,9 @@ def normalize_target_url(raw_url: str) -> Tuple[str, str, int, str]:
     """
     Validates and normalizes target URL.
     Returns (normalized_url, hostname, port, path_with_query).
-    Raises SSRFProtectionError on unsafe formatting or unapproved schemes.
+    Raises SSRFProtectionError on unsafe formatting, unapproved schemes, or prohibited destinations.
+    In development mode with ALLOW_LOCAL_DEV_SCAN=true, permits ONLY the single configured
+    LOCAL_DEV_TARGET (e.g. localhost:4000). All other private/loopback/internal targets remain strictly blocked.
     """
     clean_url = raw_url.strip()
     if not clean_url:
@@ -116,30 +233,80 @@ def normalize_target_url(raw_url: str) -> Tuple[str, str, int, str]:
     if not hostname:
         raise SSRFProtectionError("Invalid URL hostname.")
 
-    # Check blocked hostnames and suffixes
-    if hostname in BLOCKED_HOSTNAMES:
-        raise SSRFProtectionError(f"Target host '{hostname}' is a prohibited loopback/internal destination.")
-
-    for suffix in BLOCKED_HOSTNAME_SUFFIXES:
-        if hostname.endswith(suffix):
-            raise SSRFProtectionError(f"Target host '{hostname}' belongs to prohibited internal domain suffix '{suffix}'.")
-
-    # If hostname is an IP literal, validate immediately
+    # Determine port safely (urllib raises ValueError on out-of-range or malformed ports)
     try:
-        ip_obj = ipaddress.ip_address(hostname)
-    except ValueError:
-        ip_obj = None
+        port = parsed.port
+    except ValueError as e:
+        raise SSRFProtectionError(f"Malformed or out-of-range port: {str(e)}")
 
-    if ip_obj is not None and is_ip_forbidden(ip_obj):
-        raise SSRFProtectionError(f"Target host '{hostname}' is in a prohibited private, loopback, or metadata IP range.")
-
-    # Determine port
-    port = parsed.port
     if port is None:
         port = 443 if parsed.scheme.lower() == "https" else 80
 
     if port < 1 or port > 65535:
         raise SSRFProtectionError(f"Invalid port '{port}'. Must be between 1 and 65535.")
+
+    # Check whether an opt-in local dev test target is active and matches
+    local_dev_cfg = get_local_dev_target_config()
+    is_authorized_local_test_target = False
+    if local_dev_cfg is not None:
+        cfg_host = local_dev_cfg["host"]
+        cfg_port = local_dev_cfg["port"]
+        cfg_scheme = local_dev_cfg["scheme"]
+        # Exact match required for configured host and port
+        if hostname == cfg_host and port == cfg_port:
+            if parsed.scheme.lower() == cfg_scheme:
+                is_authorized_local_test_target = True
+
+    # Check whether an administrative private/internal network config is active and matches
+    internal_cfg = get_internal_network_config()
+    is_authorized_internal_target = False
+    if internal_cfg is not None:
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            # Never allow metadata (169.254.0.0/16) or loopback in internal network CIDRs
+            if not ip_obj.is_loopback and not ip_obj.is_link_local and not (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                for allowed_net in internal_cfg["allowed_networks"]:
+                    if ip_obj in allowed_net:
+                        is_authorized_internal_target = True
+                        break
+        except ValueError:
+            pass
+
+    if not is_authorized_local_test_target and not is_authorized_internal_target:
+        # Check blocked hostnames and suffixes
+        if hostname in BLOCKED_HOSTNAMES:
+            raise SSRFProtectionError(
+                f"Target host '{hostname}' is a prohibited loopback/internal destination. "
+                "Local testing requires enabling developer opt-in mode with ALLOW_LOCAL_DEV_SCAN=true."
+            )
+
+        for suffix in BLOCKED_HOSTNAME_SUFFIXES:
+            if hostname.endswith(suffix):
+                raise SSRFProtectionError(
+                    f"Target host '{hostname}' belongs to prohibited internal domain suffix '{suffix}'. "
+                    "Private/internal network targets require administrative authorization (ALLOW_INTERNAL_NETWORK_SCAN=true)."
+                )
+
+        # If hostname is an IP literal, validate immediately
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+        except ValueError:
+            ip_obj = None
+
+        if ip_obj is not None:
+            if is_ip_forbidden(ip_obj):
+                if ip_obj in ipaddress.ip_network("169.254.0.0/16") or ip_obj.is_link_local:
+                    raise SSRFProtectionError(
+                        f"Target host '{hostname}' is in a prohibited private, link-local, or cloud metadata IP range."
+                    )
+                if ip_obj.is_private:
+                    raise SSRFProtectionError(
+                        f"Target host '{hostname}' is in a prohibited private network IP range. "
+                        "Private network scanning is denied by default and requires administrative configuration (ALLOW_INTERNAL_NETWORK_SCAN=true with INTERNAL_NETWORK_ALLOWLIST)."
+                    )
+                raise SSRFProtectionError(
+                    f"Target host '{hostname}' is in a prohibited private, loopback, or metadata IP range."
+                )
 
     path_with_query = parsed.path or "/"
     if parsed.query:
@@ -159,9 +326,6 @@ DEFAULT_DNS_TIMEOUT_SECONDS = 3.0
 MAX_DNS_RESOLVER_WORKERS = 4
 
 # Bounded static executor for DNS resolution to guarantee thread accumulation bounds.
-# Architectural limitation note: Standard library socket.getaddrinfo invokes synchronous C
-# resolver routines. Python threads blocked in OS getaddrinfo cannot be forcefully aborted;
-# however, capping worker threads at MAX_DNS_RESOLVER_WORKERS strictly prevents thread explosion.
 _DNS_RESOLVER_POOL = concurrent.futures.ThreadPoolExecutor(
     max_workers=MAX_DNS_RESOLVER_WORKERS,
     thread_name_prefix="ssrf-dns-resolver"
@@ -177,10 +341,33 @@ def resolve_and_verify_ip(
     Performs bounded DNS resolution and validates every resolved IP against forbidden ranges.
     Returns (verified_ip_str, address_family) to pin the exact socket connection,
     defeating DNS rebinding attacks.
+
+    If opt-in local dev mode is active and the target strictly matches LOCAL_DEV_TARGET,
+    resolutions to loopback (127.0.0.1 or ::1) for that specific target host and port are accepted.
+    If administrative internal network mode is active with an authorized CIDR allowlist,
+    resolutions within the allowlist are accepted.
+    Any resolution to cloud metadata (169.254.x) is strictly rejected under all modes.
     """
+    local_dev_cfg = get_local_dev_target_config()
+    is_authorized_local_test_target = False
+    if local_dev_cfg is not None:
+        if hostname.lower().strip(".") == local_dev_cfg["host"] and port == local_dev_cfg["port"]:
+            is_authorized_local_test_target = True
+
+    internal_cfg = get_internal_network_config()
+
     # 1. If hostname is directly an IP literal
     try:
         ip_obj = ipaddress.ip_address(hostname)
+        if is_authorized_local_test_target and ip_obj.is_loopback:
+            family = socket.AF_INET6 if isinstance(ip_obj, ipaddress.IPv6Address) else socket.AF_INET
+            return str(ip_obj), family
+
+        if internal_cfg is not None and any(ip_obj in net for net in internal_cfg["allowed_networks"]):
+            if not ip_obj.is_link_local and not (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                family = socket.AF_INET6 if isinstance(ip_obj, ipaddress.IPv6Address) else socket.AF_INET
+                return str(ip_obj), family
+
         if is_ip_forbidden(ip_obj):
             raise SSRFProtectionError(f"Destination IP '{hostname}' is in a prohibited private or reserved range.")
         family = socket.AF_INET6 if isinstance(ip_obj, ipaddress.IPv6Address) else socket.AF_INET
@@ -216,7 +403,7 @@ def resolve_and_verify_ip(
 
     verified_ips: List[Tuple[str, socket.AddressFamily]] = []
 
-    # Check EVERY resolved IP; if any resolved IP is internal/forbidden, reject the target
+    # Check EVERY resolved IP
     for family, socktype, proto, canonname, sockaddr in addr_infos:
         ip_str = sockaddr[0]
         try:
@@ -224,15 +411,98 @@ def resolve_and_verify_ip(
         except ValueError:
             raise SSRFProtectionError(f"Invalid IP address format returned by DNS: '{ip_str}'.")
 
-        if is_ip_forbidden(ip_obj):
-            raise SSRFProtectionError(
-                f"DNS resolution for '{hostname}' returned prohibited address '{ip_str}' (private/loopback/cloud-metadata)."
-            )
+        if is_authorized_local_test_target:
+            # Under local dev mode, allow ONLY loopback address space (127.0.0.0/8 or ::1)
+            # Never allow RFC1918 internal networks (10.x, 192.168.x), carrier NAT, or cloud metadata
+            if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+                mapped = ip_obj.ipv4_mapped
+                if not mapped.is_loopback:
+                    raise SSRFProtectionError(
+                        f"Local dev scan target '{hostname}' resolved to non-loopback prohibited address '{ip_str}'."
+                    )
+            elif not ip_obj.is_loopback:
+                raise SSRFProtectionError(
+                    f"Local dev scan target '{hostname}' resolved to non-loopback prohibited address '{ip_str}'."
+                )
+        elif internal_cfg is not None and any(ip_obj in net for net in internal_cfg["allowed_networks"]):
+            if ip_obj.is_link_local or (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                raise SSRFProtectionError(f"Target '{hostname}' resolved to prohibited cloud metadata IP '{ip_str}'.")
+        else:
+            if is_ip_forbidden(ip_obj):
+                raise SSRFProtectionError(
+                    f"DNS resolution for '{hostname}' returned prohibited address '{ip_str}' (private/loopback/cloud-metadata)."
+                )
 
         verified_ips.append((ip_str, family))
 
     if not verified_ips:
-        raise SSRFProtectionError(f"Could not verify a secure public IP for '{hostname}'.")
+        raise SSRFProtectionError(f"Could not verify a secure address for '{hostname}'.")
 
     # Return the first securely verified IP
     return verified_ips[0]
+
+
+def validate_destination_url(url: str) -> Tuple[bool, str]:
+    """
+    Validates an arbitrary outbound URL (e.g. from browser subresource or navigation).
+    Returns (True, reason) if safe, or (False, rejection_reason) if it violates SSRF rules.
+    Disallows data:, file:, gopher:, ftp:, loopback, private ranges, and non-configured local hosts.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return False, f"Prohibited scheme '{scheme}'"
+
+        if not parsed.hostname:
+            return False, "Missing hostname"
+
+        hostname = parsed.hostname.lower().strip(".")
+        port = parsed.port or (443 if scheme == "https" else 80)
+
+        # Check local dev configuration
+        local_dev_cfg = get_local_dev_target_config()
+        if local_dev_cfg is not None:
+            if hostname == local_dev_cfg["host"] and port == local_dev_cfg["port"]:
+                return True, "Authorized local dev target"
+
+        # Check administrative internal network configuration
+        internal_cfg = get_internal_network_config()
+        if internal_cfg is not None:
+            try:
+                ip_obj = ipaddress.ip_address(hostname)
+                if any(ip_obj in net for net in internal_cfg["allowed_networks"]):
+                    if not ip_obj.is_link_local and not (isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in ipaddress.ip_network("169.254.0.0/16")):
+                        return True, "Authorized internal network target"
+            except ValueError:
+                pass
+
+        # Check standard allowed ports for public targets
+        if port not in (80, 443, 8080, 8443):
+            return False, f"Forbidden port '{port}' for public web scanning."
+
+        # Check blocked hostnames and suffixes
+        if hostname in BLOCKED_HOSTNAMES:
+            return False, f"Target host '{hostname}' is a prohibited loopback/internal destination."
+
+        for suffix in BLOCKED_HOSTNAME_SUFFIXES:
+            if hostname.endswith(suffix):
+                return False, f"Target host '{hostname}' belongs to prohibited internal domain suffix '{suffix}'."
+
+        # If IP literal, check immediately
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            if is_ip_forbidden(ip_obj):
+                return False, f"Target IP '{hostname}' is in a prohibited private or metadata range."
+        except ValueError:
+            pass
+
+        # Resolve IP to verify no DNS rebinding or private resolution
+        try:
+            resolve_and_verify_ip(hostname, port)
+        except SSRFProtectionError as e:
+            return False, str(e)
+
+        return True, "Safe destination"
+    except Exception as e:
+        return False, str(e)

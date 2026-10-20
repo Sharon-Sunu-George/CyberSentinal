@@ -9,6 +9,8 @@ from app.services.attacker.ssrf_guard import (
     TargetAuthorizationError,
     normalize_target_url,
     resolve_and_verify_ip,
+    get_local_dev_target_config,
+    validate_destination_url,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "TargetAuthorizationError",
     "normalize_target_url",
     "resolve_and_verify_ip",
+    "get_local_dev_target_config",
+    "validate_destination_url",
 ]
