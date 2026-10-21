@@ -52,21 +52,28 @@ const FIELD_LABEL_MAP: Record<string, string> = {
 }
 
 export function AnalystView() {
-  const { assessment, gaps, analystAssetId, navigate } = useAppState()
+  const { assessment, gaps, analystAssetId, activeReport, navigate } = useAppState()
   const [selectedAssetId, setSelectedAssetId] = useState<string>(
     analystAssetId || (assessment.assetRisks[0]?.asset.id ?? ""),
   )
   const [question] = useState(SAMPLE_QUESTION)
   const [showEvidence, setShowEvidence] = useState(false)
 
+  const currentAssetId =
+    selectedAssetId && assessment.assetRisks.some((r) => r.asset.id === selectedAssetId)
+      ? selectedAssetId
+      : analystAssetId && assessment.assetRisks.some((r) => r.asset.id === analystAssetId)
+      ? analystAssetId
+      : (assessment.assetRisks[0]?.asset.id ?? "")
+
   const selectedAssetRisk = useMemo(
-    () => assessment.assetRisks.find((r) => r.asset.id === selectedAssetId),
-    [assessment.assetRisks, selectedAssetId],
+    () => assessment.assetRisks.find((r) => r.asset.id === currentAssetId),
+    [assessment.assetRisks, currentAssetId],
   )
 
   const investigation = useMemo(
-    () => (selectedAssetId ? investigate(selectedAssetId, question, assessment, gaps) : null),
-    [selectedAssetId, question, assessment, gaps],
+    () => (currentAssetId ? investigate(currentAssetId, question, assessment, gaps) : null),
+    [currentAssetId, question, assessment, gaps],
   )
 
   // Top 3 factors
@@ -80,6 +87,15 @@ export function AnalystView() {
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 pb-12">
+      {/* Active Ingested Security Scan Notice */}
+      {activeReport && (
+        <div className="flex items-center gap-2 rounded-lg bg-card/80 border border-primary/30 px-3 py-2 text-xs text-muted-foreground shadow-sm">
+          <span className="font-semibold text-foreground">Active Scan Source:</span>
+          <span className="font-mono text-primary font-medium">{activeReport.filename || activeReport.report_id}</span>
+          <span>· Target: {activeReport.target} ({activeReport.summary.total_findings} findings evaluated)</span>
+        </div>
+      )}
+
       {/* ─────────────────────────────────────────────────────────────
           TOP: ASSET SELECTOR BAR
       ───────────────────────────────────────────────────────────── */}

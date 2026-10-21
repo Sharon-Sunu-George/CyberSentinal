@@ -438,4 +438,3 @@ class DefenderPrioritizationEngine:
             return f"Activate WAF virtual patching rule matching {rec.cve_id or 'path traversal / RCE vectors'} to block exploit probes."
         else:
             return "Monitor access logs for abnormal requests and restrict access to trusted source IP addresses."
-

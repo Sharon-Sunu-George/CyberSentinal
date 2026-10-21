@@ -774,7 +774,7 @@ class TestDefenderVerificationHardening(unittest.TestCase):
         with patch("app.api.v1.endpoints.defender.SafeHttpClient.request") as mock_req, \
              patch("app.api.v1.endpoints.defender.normalize_target_url") as mock_norm:
             mock_norm.return_value = (self.target_url, "harden-target.example.com", 443, "/")
-            
+
             # Subcase A: Still present (Origin: *, Credentials: true)
             mock_req.return_value = SafeHttpResponse(
                 url=self.target_url,
@@ -904,4 +904,3 @@ class TestDefenderVerificationHardening(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -373,10 +373,10 @@ class TestPlaywrightBrowserIsolation(unittest.IsolatedAsyncioTestCase):
                 # Verify launch args passed to Chromium
                 launch_call_args = mock_playwright.chromium.launch.call_args[1]
                 args_passed = launch_call_args.get("args", [])
-                
+
                 # Verify WebRTC is disabled
                 self.assertIn("--disable-webrtc", args_passed)
-                
+
                 # Verify Host-Rules pinning and default ~NOTFOUND fallback
                 host_rule_flag = next((a for a in args_passed if a.startswith("--host-rules=")), None)
                 self.assertIsNotNone(host_rule_flag)
@@ -581,4 +581,3 @@ class TestPlaywrightBrowserIsolation(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

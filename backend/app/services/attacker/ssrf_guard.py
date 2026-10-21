@@ -506,4 +506,3 @@ def validate_destination_url(url: str) -> Tuple[bool, str]:
         return True, "Safe destination"
     except Exception as e:
         return False, str(e)
-
