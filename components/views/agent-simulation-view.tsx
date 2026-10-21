@@ -935,6 +935,31 @@ export function AgentSimulationView() {
                         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring font-mono"
                         required
                       />
+                      {/* Quick Verified Test Presets */}
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        <span className="text-[10px] text-muted-foreground">Live Targets:</span>
+                        <button
+                          type="button"
+                          onClick={() => setTargetUrl("http://testasp.vulnweb.com")}
+                          className="rounded bg-muted/40 hover:bg-muted text-[10px] font-mono px-1.5 py-0.5 text-foreground/80 border border-border/60 transition-colors"
+                        >
+                          testasp.vulnweb.com
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTargetUrl("http://zero.webappsecurity.com")}
+                          className="rounded bg-muted/40 hover:bg-muted text-[10px] font-mono px-1.5 py-0.5 text-foreground/80 border border-border/60 transition-colors"
+                        >
+                          zero.webappsecurity.com
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTargetUrl("https://example.com")}
+                          className="rounded bg-muted/40 hover:bg-muted text-[10px] font-mono px-1.5 py-0.5 text-foreground/80 border border-border/60 transition-colors"
+                        >
+                          example.com
+                        </button>
+                      </div>
                     </div>
 
                     {/* Crawler Configuration: Max Pages & Max Depth */}

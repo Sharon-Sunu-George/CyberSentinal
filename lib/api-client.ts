@@ -661,6 +661,7 @@ export interface AttackerScanResponse {
   scope_limitations: string
   zero_findings_disclaimer?: string | null
   is_inconclusive?: boolean
+  target_unreachable?: boolean
   allows_retry?: boolean
   summary: AttackerScanSummary
   findings: VulnerabilityFinding[]

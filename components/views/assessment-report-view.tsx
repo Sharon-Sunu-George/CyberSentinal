@@ -508,8 +508,32 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
         </CardHeader>
 
         <CardContent className="space-y-4">
+          {/* Target Unreachable Notice */}
+          {(scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED")) && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs text-amber-200 space-y-1.5">
+              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <AlertTriangle className="size-4 text-amber-400" /> Target Host Unreachable / Offline
+              </p>
+              <p className="leading-relaxed text-amber-300/90 text-[11px]">
+                The target host <span className="font-mono text-foreground font-bold">{scanResult.target_url}</span> did not respond on HTTP or HTTPS ports (connection timed out or host is offline). No live web server responses could be inspected.
+              </p>
+              <div className="pt-1 flex flex-wrap gap-2 items-center">
+                <span className="text-[11px] text-muted-foreground">Try a live testing target:</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-[11px] px-2 text-foreground"
+                  onClick={() => navigate("agent-simulation")}
+                >
+                  <RefreshCw className="size-3 mr-1" />
+                  Try Live Target in Scanner
+                </Button>
+              </div>
+            </div>
+          )}
+
           {/* Inconclusive Scan Notice */}
-          {scanResult.is_inconclusive && (
+          {scanResult.is_inconclusive && !(scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED")) && (
             <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-3.5 text-xs text-blue-200 space-y-1.5">
               <p className="font-semibold text-blue-300 flex items-center gap-1.5">
                 <AlertTriangle className="size-4 text-blue-400" /> Assessment Inconclusive (Gateway / Proxy Error)
@@ -546,7 +570,15 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
             </div>
             <div className="rounded-lg border bg-muted/20 p-2.5 text-center">
               <span className="text-[10px] text-muted-foreground block uppercase">Remediation Status</span>
-              <span className="font-mono text-base font-bold text-primary">Ready to Plan</span>
+              <span className={`font-mono text-base font-bold ${
+                (scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED"))
+                  ? "text-amber-400"
+                  : "text-primary"
+              }`}>
+                {(scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED"))
+                  ? "Target Unreachable"
+                  : "Ready to Plan"}
+              </span>
             </div>
           </div>
         </CardContent>

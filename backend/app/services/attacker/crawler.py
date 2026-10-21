@@ -352,11 +352,34 @@ class PlaywrightCrawler:
 
                 try:
                     # Navigate with per-page timeout
-                    response = await page.goto(
-                        current_url,
-                        wait_until="domcontentloaded",
-                        timeout=self.per_page_timeout_ms,
-                    )
+                    try:
+                        response = await page.goto(
+                            current_url,
+                            wait_until="domcontentloaded",
+                            timeout=self.per_page_timeout_ms,
+                        )
+                    except Exception as goto_err:
+                        # If root target page fails, attempt alternate scheme (http <-> https)
+                        if depth == 0:
+                            alt_scheme_url = None
+                            if current_url.startswith("http://"):
+                                alt_scheme_url = "https://" + current_url[7:]
+                            elif current_url.startswith("https://"):
+                                alt_scheme_url = "http://" + current_url[8:]
+                            if alt_scheme_url:
+                                try:
+                                    response = await page.goto(
+                                        alt_scheme_url,
+                                        wait_until="domcontentloaded",
+                                        timeout=self.per_page_timeout_ms,
+                                    )
+                                    current_url = alt_scheme_url
+                                except Exception:
+                                    raise goto_err
+                            else:
+                                raise goto_err
+                        else:
+                            raise goto_err
 
                     # Give client-side JS / SPAs a brief moment to render dynamic anchors
                     await asyncio.sleep(0.5)

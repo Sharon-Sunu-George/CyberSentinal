@@ -322,17 +322,28 @@ class ScanJobManager:
 
             # Persist completed scan record
             completed_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            target_unreachable = bool(base_meta.get("target_unreachable")) or any(f.id == "VULN-SCAN-CONNECTION-FAILED" for f in all_findings)
+            is_inconclusive = bool(base_meta.get("is_inconclusive")) or target_unreachable
+            
+            scope_desc = (
+                f"Target host '{job.request.target_url}' could not be reached (connection timed out or host is offline). Safe passive probes could not observe live HTTP responses."
+                if target_unreachable
+                else (
+                    f"Full-site crawler visited {len(discovered_pages)} pages up to depth "
+                    f"{job.request.max_depth or 2}. Safe passive checks only."
+                )
+            )
+
             save_scan_record({
                 "scan_id": scan_id,
                 "target_url": job.request.target_url,
                 "normalized_url": crawl_summary["normalized_url"],
                 "scanned_at": completed_iso,
                 "status": "completed",
+                "is_inconclusive": is_inconclusive,
+                "target_unreachable": target_unreachable,
                 "target_ip": base_meta.get("target_ip"),
-                "scope_limitations": (
-                    f"Full-site crawler visited {len(discovered_pages)} pages up to depth "
-                    f"{job.request.max_depth or 2}. Safe passive checks only."
-                ),
+                "scope_limitations": scope_desc,
                 "scanner_info": {
                     "engine": "CyberSentinal Chromium / Playwright Headless Crawler",
                     "crawler_summary": crawl_summary,

@@ -30,7 +30,7 @@ from app.services.attacker.ssrf_guard import (
     SSRFProtectionError,
 )
 
-DEFAULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_TIMEOUT_SECONDS = 7.0
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB limit to prevent resource exhaustion
 MAX_REDIRECT_HOPS = 2
 USER_AGENT = "CyberSentinal-Security-Auditor/2.0 (+https://cybersentinel.ai/scanner-policy)"
@@ -420,16 +420,39 @@ class EvidenceBasedScanner:
             ),
         }
 
-        # Probe 1: Primary Target Page
+        # Probe 1: Primary Target Page (with automatic scheme fallback before failure)
+        main_resp = None
+        primary_conn_err = None
         try:
             main_resp = self.client.request(normalized_url, allowed_origin_host=hostname)
+        except Exception as e:
+            primary_conn_err = e
+            # Attempt automatic scheme fallback (e.g. http:// -> https:// or https:// -> http://)
+            alt_scheme_url = None
+            if normalized_url.startswith("http://"):
+                alt_scheme_url = "https://" + normalized_url[7:]
+            elif normalized_url.startswith("https://"):
+                alt_scheme_url = "http://" + normalized_url[8:]
+
+            if alt_scheme_url:
+                try:
+                    alt_norm, alt_host, _, _ = normalize_target_url(alt_scheme_url)
+                    main_resp = self.client.request(alt_norm, allowed_origin_host=alt_host)
+                    normalized_url = alt_norm
+                    hostname = alt_host
+                except Exception:
+                    main_resp = None
+
+        if main_resp is not None:
             scan_meta["target_ip"] = main_resp.remote_ip
             scan_meta["status_code"] = main_resp.status_code
             scan_meta["final_url"] = main_resp.final_url
             scan_meta["requested_url"] = main_resp.requested_url
-        except Exception as e:
-            scan_meta["error"] = str(e)
+        else:
+            err_msg = str(primary_conn_err or "Connection timed out or host unreachable")
+            scan_meta["error"] = err_msg
             scan_meta["is_inconclusive"] = True
+            scan_meta["target_unreachable"] = True
             scan_meta["allows_retry"] = True
             # Connection or network failure finding
             findings.append(
@@ -442,14 +465,14 @@ class EvidenceBasedScanner:
                     affected_url_or_component=target_url,
                     evidence=FindingEvidence(
                         check_type="connection_probe",
-                        observed_data={"error": str(e), "target_url": target_url},
-                        raw_snippet=f"Failed to establish network connection to target: {str(e)}",
+                        observed_data={"error": err_msg, "target_url": target_url},
+                        raw_snippet=f"Failed to establish network connection to target: {err_msg}",
                         status_code=None,
                         requested_url=target_url,
                         final_url=target_url,
                         observed_headers={},
                         check_result="Scan error",
-                        confidence_reason="Direct TCP connection, TLS handshake, or socket timeout error prevented receiving HTTP response.",
+                        confidence_reason="Direct TCP connection, TLS handshake, or socket timeout error prevented receiving HTTP response on both HTTP and HTTPS schemes.",
                         is_inferred=False,
                         response_timestamp=now,
                     ),

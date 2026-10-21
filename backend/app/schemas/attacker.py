@@ -173,6 +173,7 @@ class AttackerScanResponse(BaseModel):
         description="Honest security disclaimer if zero findings are returned"
     )
     is_inconclusive: bool = Field(default=False, description="True if the scan encountered upstream gateway/proxy failure or connection error")
+    target_unreachable: bool = Field(default=False, description="True if target host connection timed out or is completely offline")
     allows_retry: bool = Field(default=False, description="True if scan failed or was inconclusive due to temporary network/proxy error and can be retried")
     summary: AttackerScanSummary
     findings: List[VulnerabilityFinding]
