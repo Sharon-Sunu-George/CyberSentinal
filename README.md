@@ -9,7 +9,7 @@ CyberSentinal AI is an evidence-grounded website security assessment, threat mod
 ```mermaid
 flowchart TD
     UI[Next.js 16 Web Dashboard - Port 3000] -->|REST / Polling| API[FastAPI Backend - Port 8010]
-    
+
     subgraph AttackerModule["Attacker Agent (Offensive Reconnaissance)"]
         Scanner[SafeHttpClient - IP Pinned Sockets]
         Crawler[Playwright Headless Chromium Crawler]

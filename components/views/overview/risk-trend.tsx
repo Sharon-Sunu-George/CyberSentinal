@@ -1,100 +1,74 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useMemo } from "react"
+import { CheckCircle2, Info } from "lucide-react"
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import { TrendingDown, TrendingUp } from "lucide-react"
 import { useAppState } from "@/components/app/app-state"
 import { DemoTag, LevelBadge, scoreColor } from "@/components/app/badges"
 import { Panel } from "@/components/app/panel"
 
+function formatISTDay(date: Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata",
+    month: "short",
+    day: "numeric",
+  }).format(date)
+}
+
 export function RiskTrend({ className }: { className?: string }) {
-  const { assessment, trendHistory } = useAppState()
-
-  // State to hold the live subtle animated offset (mean-reverting around 0)
-  const [liveOffset, setLiveOffset] = useState<number>(0)
-  const offsetRef = useRef<number>(0)
-
-  // Live simulation update loop: 2-second interval, subtle noise, mean-reverting
-  useEffect(() => {
-    let isDocVisible = !document.hidden
-    const handleVisibility = () => {
-      isDocVisible = !document.hidden
-    }
-    document.addEventListener("visibilitychange", handleVisibility)
-
-    const interval = setInterval(() => {
-      if (!isDocVisible) return
-
-      // Ornstein-Uhlenbeck / Mean-Reverting Random Walk:
-      // dX = -theta * X + noise
-      // theta = 0.35 (pulls offset back toward 0)
-      const current = offsetRef.current
-      const meanReversionPull = -0.35 * current
-
-      // Generate realistic noise
-      const r = Math.random()
-      let rawStep: number
-      if (r < 0.85) {
-        rawStep = Math.random() * 0.5 - 0.25
-      } else {
-        rawStep = Math.random() * 1.2 - 0.6
-      }
-
-      // Calculate next bounded offset (bounded strictly within [-1.5, +1.5] around official score)
-      let next = current + meanReversionPull + rawStep
-      next = Math.max(-1.5, Math.min(1.5, next))
-      next = Number(next.toFixed(1))
-
-      offsetRef.current = next
-      setLiveOffset(next)
-    }, 2000)
-
-    return () => {
-      clearInterval(interval)
-      document.removeEventListener("visibilitychange", handleVisibility)
-    }
-  }, [])
-
-  // Calculate live displayed score for "Today"
-  const currentLiveScore = useMemo(() => {
-    const raw = assessment.overallScore + liveOffset
-    return Math.max(0, Math.min(100, Number(raw.toFixed(1))))
-  }, [assessment.overallScore, liveOffset])
+  const { assessment, activeReport } = useAppState()
 
   const data = useMemo(() => {
-    if (!trendHistory || trendHistory.length === 0) {
-      return [{ day: "Today", score: currentLiveScore, officialScore: assessment.overallScore }]
+    // Anchor to actual assessment timestamp or now, formatted dynamically in Asia/Kolkata (IST)
+    const anchorDate = assessment.evaluatedAt ? new Date(assessment.evaluatedAt) : new Date()
+
+    // 6-day baseline trajectory preceding the current assessment date
+    const baselineScores = [69, 71, 70, 73, 74, 76]
+    const points = []
+
+    for (let i = 6; i >= 1; i--) {
+      const pastDate = new Date(anchorDate.getTime() - i * 24 * 60 * 60 * 1000)
+      points.push({
+        day: formatISTDay(pastDate),
+        score: baselineScores[6 - i],
+        isSimulated: true,
+      })
     }
 
-    const basePoints = trendHistory.map((pt) => ({
-      day: pt.day,
-      score: pt.day === "Today" ? currentLiveScore : pt.score,
-      officialScore: pt.day === "Today" ? assessment.overallScore : pt.score,
-    }))
+    // Current point derived from the real assessment / active report
+    points.push({
+      day: formatISTDay(anchorDate),
+      score: assessment.overallScore,
+      isSimulated: false,
+    })
 
-    const last = basePoints[basePoints.length - 1]
-    if (last.day === "Today") {
-      return basePoints
-    }
-    return [...basePoints, { day: "Today", score: currentLiveScore, officialScore: assessment.overallScore }]
-  }, [trendHistory, currentLiveScore, assessment.overallScore])
+    return points
+  }, [assessment.evaluatedAt, assessment.overallScore])
 
-  const first = data[0]?.officialScore ?? assessment.overallScore
+  const first = data[0]?.score ?? assessment.overallScore
   const change = Number((assessment.overallScore - first).toFixed(1))
   const isUp = change > 0
+  const currentDayLabel = data[data.length - 1]?.day || "Today"
 
   return (
     <Panel
       className={className}
-      title="Seven-Day Risk Trend"
-      description={`Official risk score is ${assessment.overallScore}/100 (${isUp ? "+" : ""}${change} pts over 7 days). Reference line marks Critical threshold (80).`}
+      title={activeReport ? "Risk Posture Progression" : "Seven-Day Risk Trend"}
+      description={
+        activeReport
+          ? `Authoritative risk score ${assessment.overallScore}/100 derived from ${activeReport.filename || activeReport.report_id}.`
+          : `Official risk score is ${assessment.overallScore}/100 (${isUp ? "+" : ""}${change} pts over 7 days). Reference line marks Critical threshold (80).`
+      }
       action={
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
-            <span className="size-1.5 rounded-full bg-emerald-500 animate-ping" />
-            <span className="text-emerald-500 font-semibold">Live 2s</span>
-          </span>
-          <DemoTag />
+        <div className="flex flex-wrap items-center gap-2">
+          {activeReport && (
+            <span className="flex items-center gap-1.5 font-mono text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5">
+              <CheckCircle2 className="size-3 text-emerald-500" />
+              Report Assessment ({currentDayLabel})
+            </span>
+          )}
+          <DemoTag label="Simulated Baseline (Past 6 Days)" />
         </div>
       }
     >
@@ -168,23 +142,26 @@ export function RiskTrend({ className }: { className?: string }) {
               }}
             />
             <Tooltip
-              contentStyle={{
-                background: "var(--popover)",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                fontSize: 12,
-              }}
-              labelStyle={{ color: "var(--foreground)", fontWeight: 600 }}
-              itemStyle={{ color: "var(--muted-foreground)" }}
-              formatter={(v, _name, item) => {
-                const payload = item?.payload
-                if (payload?.day === "Today") {
-                  return [
-                    `${v}/100 (Official: ${payload.officialScore})`,
-                    "Live Telemetry",
-                  ]
-                }
-                return [`${v}/100`, "Assessed Risk"]
+content={({ active, payload }) => {
+                if (!active || !payload || !payload.length) return null
+                const item = payload[0].payload as { day: string; score: number; isSimulated: boolean }
+                return (
+                  <div className="rounded-md border bg-popover p-2.5 text-xs shadow-md">
+                    <p className="font-semibold text-foreground">{item.day} (IST)</p>
+                    <p className="text-muted-foreground mt-0.5">
+                      Risk Score: <strong className="font-mono text-foreground">{item.score}/100</strong>
+                    </p>
+                    <p className="text-[10px] mt-1 font-mono">
+                      {item.isSimulated ? (
+                        <span className="text-amber-500 font-medium">● Simulated Historical Baseline</span>
+                      ) : (
+                        <span className="text-emerald-500 font-medium">
+                          ● {activeReport ? "Actual Report Assessment" : "Current Assessment"}
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                )
               }}
             />
             <Area
@@ -193,7 +170,7 @@ export function RiskTrend({ className }: { className?: string }) {
               stroke="var(--high)"
               strokeWidth={2.5}
               fill="url(#trendFill)"
-              dot={{ r: 3.5, fill: "var(--high)", strokeWidth: 0 }}
+dot={{ r: 3.5, fill: "var(--high)", strokeWidth: 0 }}
               activeDot={{ r: 5 }}
               isAnimationActive={true}
               animationDuration={600}
@@ -201,6 +178,15 @@ export function RiskTrend({ className }: { className?: string }) {
             />
           </AreaChart>
         </ResponsiveContainer>
+      </div>
+
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground border-t pt-2">
+        <Info className="size-3.5 text-primary shrink-0" />
+        <span>
+          {activeReport
+            ? `Points 1–6 represent simulated baseline telemetry. Current assessment (${currentDayLabel}, IST) is calculated from ${activeReport.filename || activeReport.report_id}.`
+            : "Points 1–6 represent simulated baseline telemetry. Current score reflects evaluated active assets."}
+        </span>
       </div>
     </Panel>
   )

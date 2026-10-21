@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils"
 import { InvestmentDetailSheet } from "./investments/investment-detail-sheet"
 
 export function InvestmentsView() {
-  const { dataset, navigate } = useAppState()
+  const { dataset, currency, navigate } = useAppState()
   const [budgetInput, setBudgetInput] = useState<number>(DEFAULT_BUDGET)
   const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null)
 
@@ -68,7 +68,7 @@ export function InvestmentsView() {
               Security Investment Optimizer
             </h1>
             <p className="text-xs text-muted-foreground">
-              Simulate capital allocation to maximize financial risk reduction within budget limits.
+              Simulate capital allocation to maximize financial risk reduction within budget limits (USD Base · Displayed in {currency}).
             </p>
           </div>
         </div>
@@ -94,7 +94,7 @@ export function InvestmentsView() {
               onClick={() => setBudgetInput(500000)}
               className="h-9 text-xs px-2.5 font-mono"
             >
-              $500k
+              {formatCurrency(500000, currency)}
             </Button>
             <Button
               variant={budgetInput === 1000000 ? "default" : "outline"}
@@ -102,7 +102,7 @@ export function InvestmentsView() {
               onClick={() => setBudgetInput(1000000)}
               className="h-9 text-xs px-2.5 font-mono"
             >
-              $1M
+              {formatCurrency(1000000, currency)}
             </Button>
             <Button
               variant={budgetInput === 1500000 ? "default" : "outline"}
@@ -110,7 +110,7 @@ export function InvestmentsView() {
               onClick={() => setBudgetInput(1500000)}
               className="h-9 text-xs px-2.5 font-mono"
             >
-              $1.5M
+              {formatCurrency(1500000, currency)}
             </Button>
           </div>
         </div>
@@ -267,7 +267,7 @@ export function InvestmentsView() {
                       </span>
                       <span>·</span>
                       <span>
-                        Efficiency: <strong className="text-foreground">{efficiencyPerLakh.toFixed(1)} pts / $100k</strong>
+                        Efficiency: <strong className="text-foreground">{efficiencyPerLakh.toFixed(1)} pts / {formatCurrency(100000, currency)}</strong>
                       </span>
                       <span>·</span>
                       <span className="text-primary font-medium group-hover:underline">
@@ -280,7 +280,7 @@ export function InvestmentsView() {
                 {/* Right Metrics Box */}
                 <div className="mt-3 flex items-center justify-between border-t border-border/40 pt-3 sm:mt-0 sm:border-t-0 sm:pt-0 sm:flex-col sm:items-end sm:gap-1.5 sm:shrink-0">
                   <div className="font-mono text-base font-bold text-foreground">
-                    {formatCurrency(option.cost)}
+                    {formatCurrency(option.cost, currency)}
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="rounded bg-muted px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">

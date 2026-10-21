@@ -198,4 +198,3 @@ class VerifyRemediationResponse(BaseModel):
     observed_status: Optional[int] = None
     verification_timestamp: str
     message: str
-

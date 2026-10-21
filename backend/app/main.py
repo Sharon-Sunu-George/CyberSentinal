@@ -61,4 +61,3 @@ def health():
         "database": db_status,
         "mode": "standalone-server",
     }
-

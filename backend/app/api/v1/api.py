@@ -5,8 +5,8 @@ api_router = APIRouter()
 
 # Register risk assessment endpoints under /risk prefix
 api_router.include_router(
-    risk.router, 
-    prefix="/risk", 
+    risk.router,
+    prefix="/risk",
     tags=["Cyber Risk Quantification"]
 )
 
@@ -44,3 +44,4 @@ api_router.include_router(
     prefix="/reports",
     tags=["Security Report Analysis"]
 )
+

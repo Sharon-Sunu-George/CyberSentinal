@@ -314,7 +314,7 @@ def verify_remediation(
         orig_cookie = orig_ev.get("observed_data", {}).get("cookie")
         set_cookie_raw = resp.get_header("Set-Cookie") or ""
         cookies = [c.strip() for c in set_cookie_raw.split("\n") if c.strip()]
-        
+
         if not cookies:
             evidence_desc = "No Set-Cookie header issued on response. Cookie flag verification is inconclusive without dynamic session issuance."
             is_inconclusive = True
@@ -591,4 +591,3 @@ def get_defender_settings() -> Dict[str, Any]:
             "Estimates are evidence-based models with ±15% variance.",
         ],
     }
-
