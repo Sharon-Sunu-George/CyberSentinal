@@ -25,7 +25,7 @@ import { useAppState } from "@/components/app/app-state"
 import { apiClient } from "@/lib/api-client"
 
 export function NewAssessmentView() {
-  const { navigate } = useAppState()
+  const { navigate, recordCompletedScan } = useAppState()
 
   const [targetUrl, setTargetUrl] = useState("https://example.com")
   const [isAuthorized, setIsAuthorized] = useState(false)
@@ -135,6 +135,15 @@ export function NewAssessmentView() {
             setScanStatus("completed")
             setIsScanning(false)
             setScanStageText("Assessment completed. Navigating to report…")
+
+            // Eagerly fetch completed scan record and plan to update application state
+            apiClient
+              .getScanRecord(scanId)
+              .then(async (fullRecord) => {
+                const planRecord = await apiClient.getDefenderPlan(scanId).catch(() => null)
+                recordCompletedScan(fullRecord, planRecord)
+              })
+              .catch(() => {})
 
             // Auto-navigate to dedicated Assessment Report page with scanId
             setTimeout(() => {

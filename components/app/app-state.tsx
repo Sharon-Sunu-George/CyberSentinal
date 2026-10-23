@@ -18,7 +18,7 @@ import {
   securityGapDefinitions,
   SIMULATED_BASE_TIME,
 } from "@/lib/mock-data"
-import { assess, deriveSecurityGaps } from "@/lib/risk"
+import { assess, deriveSecurityGaps, categoryFromScore } from "@/lib/risk"
 import { runScenario, threatScenarios } from "@/lib/simulation"
 import type {
   ActivityEvent,
@@ -37,6 +37,8 @@ import {
   apiClient,
   type BackendParsedReportResponse,
   type BackendRiskAssessmentResponse,
+  type AttackerScanResponse,
+  type DefenderAnalysisResponse,
 } from "@/lib/api-client"
 
 import type { CurrencyCode } from "@/lib/types"
@@ -52,6 +54,8 @@ const STORAGE_KEYS = {
   AUTO_REFRESH: "cybersentinel_autorefresh_v1",
   SCENARIO_INDEX: "cybersentinel_scenario_index_v1",
   ACTIVE_REPORT: "cybersentinel_active_report_v1",
+  ACTIVE_WEBSITE_SCAN: "cybersentinel_active_website_scan_v1",
+  SELECTED_SCAN_ID: "cybersentinel_selected_scan_id_v1",
   VIEW: "cybersentinel_view_v1",
   HISTORY: "cybersentinel_history_v1",
   CURRENCY: "cybersentinel_currency_v1",
@@ -108,6 +112,7 @@ interface State {
   autoRefreshEnabled: boolean
   nextAssessmentSeconds: number
   activeReport: BackendParsedReportResponse | null
+  activeWebsiteScan: AttackerScanResponse | null
   currency: CurrencyCode
   lastRiskAssessmentAt: string | null
   lastReportAnalyzedAt: string | null
@@ -125,6 +130,7 @@ type Action =
   | { type: "simulate-scenario"; at: string }
   | { type: "record-remediation"; vulnerabilityId: string; at: string }
   | { type: "import-scanner-report"; report: BackendParsedReportResponse; at: string }
+  | { type: "record-completed-scan"; scan: AttackerScanResponse; plan?: DefenderAnalysisResponse | null; at: string }
   | { type: "restore-baseline"; at: string }
   | { type: "toggle-auto-refresh" }
   | { type: "decrement-timer" }
@@ -146,6 +152,8 @@ function loadPersistedState(): Partial<State> {
     const savedAutoRefresh = localStorage.getItem(STORAGE_KEYS.AUTO_REFRESH)
     const savedScenarioIdx = localStorage.getItem(STORAGE_KEYS.SCENARIO_INDEX)
     const savedReport = localStorage.getItem(STORAGE_KEYS.ACTIVE_REPORT)
+    const savedWebsiteScan = localStorage.getItem(STORAGE_KEYS.ACTIVE_WEBSITE_SCAN)
+    const savedSelectedScanId = localStorage.getItem(STORAGE_KEYS.SELECTED_SCAN_ID)
     const savedHistory = localStorage.getItem(STORAGE_KEYS.HISTORY)
     const savedCurrency = localStorage.getItem(STORAGE_KEYS.CURRENCY) as CurrencyCode | null
     const savedLastAssessment = localStorage.getItem(STORAGE_KEYS.LAST_ASSESSMENT_AT)
@@ -159,6 +167,8 @@ function loadPersistedState(): Partial<State> {
       autoRefreshEnabled: savedAutoRefresh !== null ? JSON.parse(savedAutoRefresh) : undefined,
       scenarioIndex: savedScenarioIdx !== null ? Number(savedScenarioIdx) : undefined,
       activeReport: savedReport ? JSON.parse(savedReport) : null,
+      activeWebsiteScan: savedWebsiteScan ? JSON.parse(savedWebsiteScan) : null,
+      selectedScanId: savedSelectedScanId || null,
       history: savedHistory ? JSON.parse(savedHistory) : undefined,
       currency: savedCurrency || "USD",
       lastRiskAssessmentAt: savedLastAssessment || null,
@@ -192,6 +202,16 @@ function saveStateToStorage(state: State) {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_REPORT, JSON.stringify(state.activeReport))
     } else {
       localStorage.removeItem(STORAGE_KEYS.ACTIVE_REPORT)
+    }
+    if (state.activeWebsiteScan) {
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_WEBSITE_SCAN, JSON.stringify(state.activeWebsiteScan))
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_WEBSITE_SCAN)
+    }
+    if (state.selectedScanId) {
+      localStorage.setItem(STORAGE_KEYS.SELECTED_SCAN_ID, state.selectedScanId)
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.SELECTED_SCAN_ID)
     }
   } catch {
     // LocalStorage write ignored
@@ -243,6 +263,7 @@ function initState(): State {
     autoRefreshEnabled: true,
     nextAssessmentSeconds: DEFAULT_AUTO_REFRESH_INTERVAL_SEC,
     activeReport: null,
+    activeWebsiteScan: null,
     currency: "USD",
     lastRiskAssessmentAt: SIMULATED_BASE_TIME,
     lastReportAnalyzedAt: null,
@@ -280,10 +301,11 @@ function reducer(state: State, action: Action): State {
         autoRefreshEnabled: p.autoRefreshEnabled !== undefined ? p.autoRefreshEnabled : state.autoRefreshEnabled,
         scenarioIndex: p.scenarioIndex !== undefined ? p.scenarioIndex : state.scenarioIndex,
         activeReport: p.activeReport !== undefined ? p.activeReport : state.activeReport,
+        activeWebsiteScan: p.activeWebsiteScan !== undefined ? p.activeWebsiteScan : state.activeWebsiteScan,
+        selectedScanId: p.selectedScanId !== undefined ? p.selectedScanId : state.selectedScanId,
         currency: p.currency || state.currency,
         lastRiskAssessmentAt: p.lastRiskAssessmentAt !== undefined ? p.lastRiskAssessmentAt : state.lastRiskAssessmentAt,
         lastReportAnalyzedAt: p.lastReportAnalyzedAt !== undefined ? p.lastReportAnalyzedAt : state.lastReportAnalyzedAt,
-        selectedScanId: state.selectedScanId,
       }
     }
 
@@ -371,8 +393,8 @@ function reducer(state: State, action: Action): State {
     }
 
     case "simulate-tick": {
-      // If a real scan report is actively loaded, do not mutate its real findings with synthetic demo scenarios
-      if (state.activeReport) {
+      // If a real scan report or website scan is actively loaded, do not mutate its real findings with synthetic demo scenarios
+      if (state.activeReport || state.activeWebsiteScan) {
         return {
           ...state,
           nextAssessmentSeconds: DEFAULT_AUTO_REFRESH_INTERVAL_SEC,
@@ -636,6 +658,7 @@ function reducer(state: State, action: Action): State {
         ...state,
         dataset,
         activeReport: report,
+        activeWebsiteScan: null, // Clear website scan when file report is imported
         previousAssessment: state.assessment,
         assessment: calculatedAssessment,
         trendHistory: nextTrend,
@@ -646,6 +669,153 @@ function reducer(state: State, action: Action): State {
         isStale: false,
         nextAssessmentSeconds: DEFAULT_AUTO_REFRESH_INTERVAL_SEC,
         lastReportAnalyzedAt: reportTimestamp,
+        lastRiskAssessmentAt: action.at,
+      }
+      saveStateToStorage(nextState)
+      return nextState
+    }
+
+    case "record-completed-scan": {
+      const scan = action.scan
+      const plan = action.plan
+      const targetName = scan.normalized_url || scan.target_url
+      const assetId = `asset-${scan.scan_id}`
+      const findings = scan.findings || []
+
+      const critical = scan.summary?.critical_count ?? findings.filter((f) => f.severity.toLowerCase() === "critical").length
+      const high = scan.summary?.high_count ?? findings.filter((f) => f.severity.toLowerCase() === "high").length
+      const medium = scan.summary?.medium_count ?? findings.filter((f) => f.severity.toLowerCase() === "medium").length
+      const low = scan.summary?.low_count ?? findings.filter((f) => f.severity.toLowerCase() === "low").length
+      const total = findings.length
+
+      const baseScore = plan?.baseline_risk_score ?? (
+        total === 0
+          ? 10.0
+          : Math.min(100, Math.round(critical * 35 + high * 25 + medium * 14 + low * 6))
+      )
+      const roundedScore = Math.min(100, Math.max(0, Math.round(baseScore)))
+
+      const asset: Asset = {
+        id: assetId,
+        name: targetName,
+        type: "Web Server",
+        owner: "SecOps / Engineering",
+        criticality: critical > 0 ? "Critical" : high > 0 ? "High" : "Medium",
+        exposure: "Internet-facing",
+        threatEvidence: critical > 0 ? 0.9 : high > 0 ? 0.75 : 0.5,
+        openHighSeverityIncidents: critical + high,
+        openVulnerabilityCount: total,
+        controls: {
+          mfa: critical > 0 ? "Missing" : "Active",
+          edr: high > 0 ? "Partial" : "Active",
+          patching: total > 0 ? "Missing" : "Active",
+          segmentation: critical > 0 ? "Missing" : "Partial",
+          backup: "Active",
+        },
+      }
+
+      const vulns: Vulnerability[] = findings.map((f, i) => {
+        const sevLower = f.severity.toLowerCase()
+        const sev: Severity =
+          sevLower === "critical"
+            ? "Critical"
+            : sevLower === "high"
+            ? "High"
+            : sevLower === "medium"
+            ? "Medium"
+            : "Low"
+        const cvss =
+          (f as any).cvss_score ??
+          (sev === "Critical" ? 9.2 : sev === "High" ? 7.5 : sev === "Medium" ? 5.4 : 2.5)
+        return {
+          id: `vuln-scan-${scan.scan_id}-${f.id || i}`,
+          demoId: f.cve_id || f.id || `VULN-${i + 1}`,
+          title: f.title,
+          assetId,
+          cvss,
+          exploitStatus:
+            sev === "Critical"
+              ? "Exploited (simulated intel)"
+              : sev === "High"
+              ? "Public PoC"
+              : "None known",
+          patchAvailable: true,
+          remediated: f.remediation_status === "Fixed" || f.remediation_status === "Verified",
+          lastAssessed: scan.scanned_at || action.at,
+          remediation: f.remediation || `Remediate ${f.title}`,
+        }
+      })
+
+      const dataset: Dataset = {
+        assets: [asset],
+        vulnerabilities: vulns,
+      }
+
+      const calculatedAssessment = assess(dataset, action.at)
+      calculatedAssessment.overallScore = roundedScore
+      calculatedAssessment.overallCategory = categoryFromScore(roundedScore)
+      calculatedAssessment.criticalAssetCount = critical > 0 ? 1 : 0
+      calculatedAssessment.openHighSeverityIncidents = critical + high
+      calculatedAssessment.openVulnerabilityCount = total
+      if (calculatedAssessment.assetRisks.length > 0) {
+        calculatedAssessment.assetRisks[0].score = roundedScore
+        calculatedAssessment.assetRisks[0].category = calculatedAssessment.overallCategory
+        calculatedAssessment.assetRisks[0].asset = asset
+        calculatedAssessment.assetRisks[0].nextAction = vulns[0] ? `Remediate ${vulns[0].title}` : "Maintain secure perimeter"
+      }
+
+      const annualAle = (critical * 250000) + (high * 100000) + (medium * 35000) + (low * 10000)
+      const mitigatedAle = Math.round(annualAle * 0.28)
+      calculatedAssessment.backendResult = {
+        scenario_name: `${scan.scan_id} - ${targetName} Perimeter Assessment`,
+        asset_name: targetName,
+        asset_value: 5000000,
+        metrics: {
+          loss_event_frequency: critical > 0 ? 1.85 : high > 0 ? 1.2 : 0.5,
+          single_loss_expectancy: 250000,
+          annual_loss_expectancy: annualAle,
+          mitigated_annual_loss_expectancy: mitigatedAle,
+          annual_risk_reduction: annualAle - mitigatedAle,
+          security_roi_percentage: annualAle > 0 ? 275 : null,
+        },
+        assumptions: [
+          `Target: ${targetName} (Scan ID: ${scan.scan_id}).`,
+          `Distribution: ${critical} Critical, ${high} High, ${medium} Medium, ${low} Low (${total} total findings).`,
+          `Status: ${scan.target_unreachable ? "Host Unreachable" : scan.status}.`,
+        ],
+        recommendation: vulns[0]
+          ? `Remediate ${critical + high} Critical and High findings on ${targetName} to address perimeter exposure.`
+          : `Perimeter evaluated with no critical or high severity findings. Maintain baseline configuration.`,
+      }
+
+      const event: ActivityEvent = {
+        id: `evt-scan-${scan.scan_id}-${action.at}`,
+        at: action.at,
+        kind: "assessment",
+        title: `Website Security Scan Completed: ${targetName}`,
+        description: `Ingested ${total} perimeter findings (${critical} Critical, ${high} High, ${medium} Medium, ${low} Low). Perimeter score: ${roundedScore}/100. Scan ID: ${scan.scan_id}.`,
+        severity: critical > 0 ? "Critical" : high > 0 ? "High" : "Medium",
+        overallChange: { before: state.assessment.overallScore, after: roundedScore },
+      }
+
+      const nextTrend = updateTrend(state.trendHistory, roundedScore)
+      const filteredActivity = state.activity.filter((e) => !e.id.startsWith(`evt-scan-${scan.scan_id}`))
+
+      const nextState: State = {
+        ...state,
+        dataset,
+        activeWebsiteScan: scan,
+        activeReport: null, // Clear old document report so dashboard uses website scan!
+        selectedScanId: scan.scan_id,
+        previousAssessment: state.assessment,
+        assessment: calculatedAssessment,
+        trendHistory: nextTrend,
+        activity: [event, ...filteredActivity.slice(0, 49)],
+        unread: state.unread + 1,
+        isAssessing: false,
+        assessmentError: null,
+        isStale: false,
+        nextAssessmentSeconds: DEFAULT_AUTO_REFRESH_INTERVAL_SEC,
         lastRiskAssessmentAt: action.at,
       }
       saveStateToStorage(nextState)
@@ -691,6 +861,8 @@ function reducer(state: State, action: Action): State {
         ...state,
         dataset,
         activeReport: null,
+        activeWebsiteScan: null,
+        selectedScanId: null,
         previousAssessment: state.assessment,
         assessment: calculatedAssessment,
         trendHistory: nextTrend,
@@ -751,6 +923,7 @@ interface AppContextValue extends State {
   runAssessment: () => Promise<void>
   recordRiskAssessment: (backendResult: BackendRiskAssessmentResponse) => void
   importScannerReport: (report: BackendParsedReportResponse) => void
+  recordCompletedScan: (scan: AttackerScanResponse, plan?: DefenderAnalysisResponse | null) => void
   restoreBaseline: () => void
   clearAssessmentError: () => void
   simulateThreat: () => void
@@ -899,6 +1072,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  const recordCompletedScan = useCallback((scan: AttackerScanResponse, plan?: DefenderAnalysisResponse | null) => {
+    dispatch({
+      type: "record-completed-scan",
+      scan,
+      plan,
+      at: new Date().toISOString(),
+    })
+  }, [])
+
   const restoreBaseline = useCallback(() => {
     dispatch({
       type: "restore-baseline",
@@ -968,6 +1150,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       runAssessment,
       recordRiskAssessment,
       importScannerReport,
+      recordCompletedScan,
       restoreBaseline,
       clearAssessmentError,
       simulateThreat,
@@ -986,6 +1169,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       runAssessment,
       recordRiskAssessment,
       importScannerReport,
+      recordCompletedScan,
       restoreBaseline,
       clearAssessmentError,
       simulateThreat,

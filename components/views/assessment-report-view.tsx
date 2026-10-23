@@ -35,7 +35,7 @@ import {
 } from "@/lib/api-client"
 
 export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }) {
-  const { selectedScanId, navigate } = useAppState()
+  const { selectedScanId, navigate, recordCompletedScan } = useAppState()
   const activeScanId = propScanId || selectedScanId
 
   const [scanResult, setScanResult] = useState<AttackerScanResponse | null>(null)
@@ -68,6 +68,8 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
 
       const record = await apiClient.getScanRecord(targetId)
       setScanResult(record)
+      const plan = await apiClient.getDefenderPlan(targetId).catch(() => null)
+      recordCompletedScan(record, plan)
 
       if (record.discovered_pages && record.discovered_pages.length > 0) {
         setPagesList(record.discovered_pages)
@@ -131,9 +133,6 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
             {error || "No scan record found. You can start a new assessment or view recent scans."}
           </p>
           <div className="flex justify-center gap-3">
-            <Button variant="outline" size="sm" onClick={() => navigate("overview")}>
-              Executive Overview
-            </Button>
             <Button size="sm" onClick={() => navigate("agent-simulation")}>
               Attack Surface Scanner
             </Button>
@@ -151,27 +150,38 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
     low_count: scanResult.findings.filter((f) => f.severity === "Low").length,
   }
 
+  // Group findings by severity
+  const severityGroups = ["Critical", "High", "Medium", "Low", "Info"] as const
+  const findingsBySeverity = severityGroups.map((sev) => ({
+    severity: sev,
+    findings: scanResult.findings.filter((f) => f.severity.toLowerCase() === sev.toLowerCase()),
+  }))
+
+  const totalFindings = scanResult.findings.length
+  const criticalHighCount = s.critical_count + s.high_count
+  const isTargetUnreachable = scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED")
+
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 pb-12">
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 pb-16">
       {/* ─────────────────────────────────────────────────────────────
-          PAGE HEADER
+          1. HEADER & TOP ACTIONS (Preserved existing top actions)
       ───────────────────────────────────────────────────────────── */}
-      <div className="flex flex-col gap-2 border-b border-border/80 pb-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-lg bg-primary/15 text-primary ring-1 ring-primary/30">
+      <div className="flex flex-col gap-3 border-b border-border/80 pb-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary ring-1 ring-primary/30">
             <FileText className="size-5" />
           </span>
-          <div>
-            <h1 className="text-lg font-bold tracking-tight text-foreground truncate max-w-xl">
-              Assessment Report: {scanResult.normalized_url}
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight text-foreground truncate">
+              Assessment Report
             </h1>
-            <p className="text-xs font-mono text-muted-foreground">
-              Scan ID: <span className="text-foreground">{scanResult.scan_id}</span> · Scanned {new Date(scanResult.scanned_at).toLocaleString()}
+            <p className="text-xs text-muted-foreground truncate font-mono">
+              {scanResult.normalized_url || scanResult.target_url}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <Button
             variant="outline"
             size="sm"
@@ -179,15 +189,6 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
             className="h-8 gap-1.5 text-xs"
           >
             <ArrowLeft className="size-3" /> Back to Scanner
-          </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => navigate("overview")}
-            className="h-8 gap-1.5 text-xs"
-          >
-            Overview
           </Button>
 
           <Button
@@ -202,249 +203,144 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
       </div>
 
       {/* ─────────────────────────────────────────────────────────────
-          SECTION A: WEBSITE TRUST & FRAUD ASSESSMENT
+          2. TARGET & STATUS
       ───────────────────────────────────────────────────────────── */}
-      <Card className="border-border bg-card shadow-sm overflow-hidden">
-        <CardHeader className="pb-3 border-b border-border/60 bg-muted/20">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <ShieldAlert className="size-4 text-primary" />
-                <CardTitle className="text-base text-foreground">
-                  Section A: Website Trust & Fraud Assessment
-                </CardTitle>
-              </div>
-              <CardDescription className="text-xs text-muted-foreground mt-0.5">
-                Independent threat intelligence, brand impersonation, and legitimacy evaluation.
-              </CardDescription>
+      <Card className="border-border bg-card shadow-sm">
+        <CardContent className="p-4 sm:p-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs font-mono">
+            <div className="space-y-1">
+              <span className="text-[10px] uppercase text-muted-foreground tracking-wider font-sans font-medium block">
+                Target Destination
+              </span>
+              <p className="text-foreground font-semibold truncate text-xs" title={scanResult.target_url}>
+                {scanResult.target_url}
+              </p>
+              {scanResult.target_ip && (
+                <p className="text-[11px] text-muted-foreground truncate">
+                  IP: {scanResult.target_ip}
+                </p>
+              )}
             </div>
 
-            {/* Trust State Badge */}
-            {scanResult.trust_assessment ? (
-              <div className="flex items-center gap-2">
-                <span
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wider ${
-                    scanResult.trust_assessment.trust_state === "Known Malicious / Phishing"
-                      ? "bg-rose-500/20 text-rose-400 border-rose-500/50"
-                      : scanResult.trust_assessment.trust_state === "Likely Impersonation"
-                      ? "bg-orange-500/20 text-orange-400 border-orange-500/50"
-                      : scanResult.trust_assessment.trust_state === "Suspicious"
-                      ? "bg-amber-500/20 text-amber-400 border-amber-500/50"
-                      : scanResult.trust_assessment.trust_state === "No Known Threat Detected"
-                      ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/50"
-                      : "bg-blue-500/20 text-blue-400 border-blue-500/50"
-                  }`}
-                >
-                  {scanResult.trust_assessment.trust_state === "Known Malicious / Phishing" && <XCircle className="size-3.5" />}
-                  {scanResult.trust_assessment.trust_state === "Likely Impersonation" && <AlertTriangle className="size-3.5" />}
-                  {scanResult.trust_assessment.trust_state === "Suspicious" && <AlertTriangle className="size-3.5" />}
-                  {scanResult.trust_assessment.trust_state === "No Known Threat Detected" && <CheckCircle2 className="size-3.5" />}
-                  {scanResult.trust_assessment.trust_state === "Inconclusive" && <Info className="size-3.5" />}
-                  {scanResult.trust_assessment.trust_state}
-                </span>
-              </div>
-            ) : (
-              <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground font-mono">
-                Trust Assessment Not Performed
+            <div className="space-y-1">
+              <span className="text-[10px] uppercase text-muted-foreground tracking-wider font-sans font-medium block">
+                Scan ID
               </span>
-            )}
-          </div>
-        </CardHeader>
+              <p className="text-foreground truncate text-xs font-bold" title={scanResult.scan_id}>
+                {scanResult.scan_id}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {new Date(scanResult.scanned_at).toLocaleDateString()} {new Date(scanResult.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </p>
+            </div>
 
-        <CardContent className="space-y-4 pt-4">
-          {scanResult.trust_assessment ? (
-            <>
-              {/* Trust Summary & Canonical Target */}
-              <div className="rounded-lg border bg-muted/15 p-3.5 text-xs space-y-2">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px] text-muted-foreground">
-                  <div>
-                    Canonical Target: <span className="font-mono text-foreground font-bold">{scanResult.trust_assessment.canonical_url}</span>
-                  </div>
-                  <div>
-                    Confidence: <span className="font-mono text-primary uppercase font-bold">{scanResult.trust_assessment.confidence}</span> · Assessed: {new Date(scanResult.trust_assessment.assessed_at).toLocaleTimeString()}
-                  </div>
-                </div>
-                <p className="text-foreground text-xs leading-relaxed font-medium">
-                  {scanResult.trust_assessment.trust_score_label}
-                </p>
-                {scanResult.trust_assessment.assessment_notes && scanResult.trust_assessment.assessment_notes.length > 0 && (
-                  <ul className="list-disc list-inside space-y-1 text-[11px] text-muted-foreground pt-1">
-                    {scanResult.trust_assessment.assessment_notes.map((note, nIdx) => (
-                      <li key={nIdx}>{note}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-
-              {/* Providers Status & Warnings */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  <span>Threat Intelligence Providers</span>
-                  <span className="text-[10px] lowercase text-muted-foreground">server-side API lookups</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  {/* Google Safe Browsing */}
-                  {(() => {
-                    const match = scanResult.trust_assessment?.threat_intel_matches.find(
-                      (m) => m.provider.toLowerCase().includes("safe browsing")
-                    )
-                    const status = match ? match.status : (scanResult.trust_assessment?.reputation_providers_configured ? "no_match" : "unconfigured")
-                    return (
-                      <div className="rounded-lg border bg-card p-3 space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold text-foreground flex items-center gap-1.5">
-                            <Globe className="size-3.5 text-primary" /> Google Safe Browsing
-                          </span>
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase font-bold ${
-                              status === "no_match"
-                                ? "bg-emerald-500/15 text-emerald-400"
-                                : status === "match_detected"
-                                ? "bg-rose-500/15 text-rose-400"
-                                : status === "unconfigured"
-                                ? "bg-amber-500/15 text-amber-400"
-                                : "bg-muted text-muted-foreground"
-                            }`}
-                          >
-                            {status === "no_match" ? "clean" : status === "match_detected" ? "match" : status}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground">
-                          {status === "unconfigured"
-                            ? "API key not set in GOOGLE_SAFE_BROWSING_API_KEY. Provider lookup skipped."
-                            : status === "no_match"
-                            ? "No malicious entry found in Google Safe Browsing v4 threat lists."
-                            : status === "match_detected"
-                            ? (match?.details || "Threat list entry match detected!")
-                            : (match?.details || "Service was unreachable or timed out.")}
-                        </p>
-                      </div>
-                    )
-                  })()}
-
-                  {/* PhishTank */}
-                  {(() => {
-                    const match = scanResult.trust_assessment?.threat_intel_matches.find(
-                      (m) => m.provider.toLowerCase().includes("phishtank")
-                    )
-                    const status = match ? match.status : (scanResult.trust_assessment?.reputation_providers_configured ? "no_match" : "unconfigured")
-                    return (
-                      <div className="rounded-lg border bg-card p-3 space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold text-foreground flex items-center gap-1.5">
-                            <Shield className="size-3.5 text-primary" /> PhishTank Verification
-                          </span>
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase font-bold ${
-                              status === "no_match"
-                                ? "bg-emerald-500/15 text-emerald-400"
-                                : status === "match_detected"
-                                ? "bg-rose-500/15 text-rose-400"
-                                : status === "unconfigured"
-                                ? "bg-amber-500/15 text-amber-400"
-                                : "bg-muted text-muted-foreground"
-                            }`}
-                          >
-                            {status === "no_match" ? "clean" : status === "match_detected" ? "match" : status}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground">
-                          {status === "unconfigured"
-                            ? "API key not set in PHISHTANK_API_KEY. Provider lookup skipped."
-                            : status === "no_match"
-                            ? "URL is not listed in PhishTank verified phishing database."
-                            : status === "match_detected"
-                            ? (match?.details || "Verified phishing URL found in PhishTank database!")
-                            : (match?.details || "Service unavailable or lookup timed out.")}
-                        </p>
-                      </div>
-                    )
-                  })()}
-                </div>
-
-                {/* Unconfigured Provider Warning Banner */}
-                {!scanResult.trust_assessment.reputation_providers_configured && (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 flex items-start gap-2">
-                    <Info className="size-4 shrink-0 text-amber-400 mt-0.5" />
-                    <div>
-                      <span className="font-bold">Live Threat Reputation Checking is Limited:</span>
-                      <p className="text-[11px] text-amber-300/90 mt-0.5">
-                        External threat-intelligence API keys (GOOGLE_SAFE_BROWSING_API_KEY / PHISHTANK_API_KEY) are not configured on this server. Impersonation, typosquatting, and heuristic lookalike domain analysis were performed locally.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Impersonation & Lookalike Indicators */}
-              {scanResult.trust_assessment.impersonation_signals && scanResult.trust_assessment.impersonation_signals.length > 0 && (
-                <div className="space-y-2">
-                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider block">
-                    Detected Impersonation & Fraud Signals ({scanResult.trust_assessment.impersonation_signals.length})
-                  </span>
-                  <div className="space-y-2">
-                    {scanResult.trust_assessment.impersonation_signals.map((sig, idx) => (
-                      <div
-                        key={idx}
-                        className={`rounded-lg border p-3 text-xs space-y-1 ${
-                          sig.severity === "High"
-                            ? "border-rose-500/40 bg-rose-500/5"
-                            : sig.severity === "Medium"
-                            ? "border-amber-500/40 bg-amber-500/5"
-                            : "border-border bg-muted/10"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-foreground flex items-center gap-1.5">
-                            <AlertTriangle className={`size-3.5 ${sig.severity === "High" ? "text-rose-400" : "text-amber-400"}`} />
-                            {sig.signal_type.replace(/_/g, " ").toUpperCase()}
-                          </span>
-                          <span className="text-[10px] font-mono uppercase text-muted-foreground font-semibold">
-                            Severity: {sig.severity}
-                          </span>
-                        </div>
-                        <p className="text-xs text-foreground/90">{sig.description}</p>
-                        <div className="rounded bg-black/40 p-2 font-mono text-[11px] text-muted-foreground">
-                          Evidence: <span className="text-foreground">{JSON.stringify(sig.evidence)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Limitations & Disclaimer */}
-              <div className="rounded border border-border/60 bg-muted/10 p-2.5 text-[11px] text-muted-foreground flex items-start gap-2">
-                <Info className="size-3.5 shrink-0 text-muted-foreground mt-0.5" />
-                <span>
-                  <strong>Assessment Scope & Limitations:</strong> A clean lookup against blacklist providers does not guarantee safety. CyberSentinal distinguishes website trust from technical vulnerabilities (e.g. missing HTTP headers).
+            <div className="space-y-1">
+              <span className="text-[10px] uppercase text-muted-foreground tracking-wider font-sans font-medium block">
+                Backend Status
+              </span>
+              <div>
+                <span className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-semibold uppercase ${
+                  isTargetUnreachable
+                    ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                    : scanResult.status === "completed"
+                    ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                    : scanResult.status === "failed"
+                    ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                    : "bg-primary/15 text-primary border border-primary/30"
+                }`}>
+                  {scanResult.status === "completed" && <CheckCircle2 className="size-3" />}
+                  {isTargetUnreachable ? "Host Unreachable" : scanResult.status}
                 </span>
               </div>
-            </>
-          ) : (
-            <p className="text-xs text-muted-foreground">No trust assessment data available for this scan.</p>
+              <p className="text-[11px] text-muted-foreground truncate font-sans">
+                {scanResult.scanner_info?.engine || "Headless Playwright"}
+              </p>
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-[10px] uppercase text-muted-foreground tracking-wider font-sans font-medium block">
+                Coverage Scope
+              </span>
+              <p className="text-foreground text-xs">
+                {pagesList.length || 1} {pagesList.length === 1 ? "page" : "pages"} crawled
+              </p>
+              <p className="text-[11px] text-muted-foreground truncate font-sans" title={scanResult.scope_limitations}>
+                {scanResult.scope_limitations || "Non-destructive passive audit"}
+              </p>
+            </div>
+          </div>
+
+          {/* Unreachable alert notice (rendered only when target truly offline) */}
+          {isTargetUnreachable && (
+            <div className="mt-4 rounded border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 flex items-start gap-2.5">
+              <AlertTriangle className="size-4 shrink-0 text-amber-400 mt-0.5" />
+              <div className="space-y-0.5">
+                <span className="font-semibold text-amber-200">Target host offline or unreachable</span>
+                <p className="text-[11px] text-amber-300/80 leading-relaxed font-sans">
+                  The target server did not respond on HTTP/HTTPS ports during the assessment. Verify the host address or retry with a reachable target.
+                </p>
+              </div>
+            </div>
           )}
         </CardContent>
       </Card>
 
       {/* ─────────────────────────────────────────────────────────────
-          SECTION B: TECHNICAL SECURITY ASSESSMENT
+          3. RISK SUMMARY
+      ───────────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+        <div className="rounded-lg border bg-card p-3.5 space-y-1">
+          <span className="text-[10px] uppercase text-muted-foreground font-semibold block">Total Findings</span>
+          <span className="font-mono text-xl font-bold text-foreground">{totalFindings}</span>
+          <p className="text-[10px] text-muted-foreground">Observable security items</p>
+        </div>
+
+        <div className="rounded-lg border bg-card p-3.5 space-y-1">
+          <span className="text-[10px] uppercase text-muted-foreground font-semibold block">Critical & High</span>
+          <span className={`font-mono text-xl font-bold ${criticalHighCount > 0 ? "text-destructive" : "text-emerald-400"}`}>
+            {criticalHighCount}
+          </span>
+          <p className="text-[10px] text-muted-foreground">{s.critical_count} critical, {s.high_count} high</p>
+        </div>
+
+        <div className="rounded-lg border bg-card p-3.5 space-y-1">
+          <span className="text-[10px] uppercase text-muted-foreground font-semibold block">Medium & Low</span>
+          <span className="font-mono text-xl font-bold text-foreground">{s.medium_count + s.low_count}</span>
+          <p className="text-[10px] text-muted-foreground">{s.medium_count} medium, {s.low_count} low</p>
+        </div>
+
+        <div className="rounded-lg border bg-card p-3.5 space-y-1">
+          <span className="text-[10px] uppercase text-muted-foreground font-semibold block">Trust Standing</span>
+          <span className={`font-mono text-base font-bold truncate block ${
+            scanResult.trust_assessment?.trust_state === "Known Malicious / Phishing"
+              ? "text-rose-400"
+              : scanResult.trust_assessment?.trust_state === "Suspicious" || scanResult.trust_assessment?.trust_state === "Likely Impersonation"
+              ? "text-amber-400"
+              : "text-emerald-400"
+          }`}>
+            {scanResult.trust_assessment?.trust_state || "Evaluated"}
+          </span>
+          <p className="text-[10px] text-muted-foreground truncate">{scanResult.trust_assessment?.trust_score_label || "No threats listed"}</p>
+        </div>
+      </div>
+
+      {/* ─────────────────────────────────────────────────────────────
+          4. SEVERITY-GROUPED FINDINGS & EXPANDABLE EVIDENCE & RECOMMENDED FIXES
       ───────────────────────────────────────────────────────────── */}
       <Card className="border-border bg-card shadow-sm">
-        <CardHeader className="pb-3">
+        <CardHeader className="pb-3 border-b border-border/60">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <CardTitle className="text-base text-foreground flex items-center gap-2">
-                <Shield className="size-4 text-primary" />
-                Section B: Technical Security Assessment
+                <ShieldAlert className="size-4 text-primary" />
+                Security Findings
               </CardTitle>
               <CardDescription className="text-xs text-muted-foreground">
-                Target IP: {scanResult.target_ip || "Public Gateway"} · Scope: {scanResult.scope_limitations || "Non-destructive perimeter inspection"}
+                Grouped by severity level. Expand each finding for wire evidence and remediation instructions.
               </CardDescription>
             </div>
 
-            {/* Severity Filter Buttons */}
+            {/* Severity Filter Pills */}
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               <button
                 type="button"
@@ -455,350 +351,397 @@ export function AssessmentReportView({ scanId: propScanId }: { scanId?: string }
                     : "bg-muted text-muted-foreground hover:bg-muted/80"
                 }`}
               >
-                All ({s.total_findings})
+                All ({totalFindings})
               </button>
-              {s.critical_count > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setSeverityFilter("Critical")}
-                  className={`rounded px-2.5 py-1 font-mono text-[11px] ${
-                    severityFilter === "Critical"
-                      ? "bg-rose-500 text-white font-bold"
-                      : "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25"
-                  }`}
-                >
-                  Critical ({s.critical_count})
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setSeverityFilter("High")}
-                className={`rounded px-2.5 py-1 font-mono text-[11px] ${
-                  severityFilter === "High"
-                    ? "bg-destructive text-destructive-foreground font-bold"
-                    : "bg-destructive/15 text-destructive hover:bg-destructive/25"
-                }`}
-              >
-                High ({s.high_count})
-              </button>
-              <button
-                type="button"
-                onClick={() => setSeverityFilter("Medium")}
-                className={`rounded px-2.5 py-1 font-mono text-[11px] ${
-                  severityFilter === "Medium"
-                    ? "bg-amber-500 text-black font-bold"
-                    : "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
-                }`}
-              >
-                Medium ({s.medium_count})
-              </button>
-              <button
-                type="button"
-                onClick={() => setSeverityFilter("Low")}
-                className={`rounded px-2.5 py-1 font-mono text-[11px] ${
-                  severityFilter === "Low"
-                    ? "bg-blue-500 text-white font-bold"
-                    : "bg-blue-500/15 text-blue-400 hover:bg-blue-500/25"
-                }`}
-              >
-                Low ({s.low_count})
-              </button>
+              {severityGroups.map((sev) => {
+                const count = scanResult.findings.filter((f) => f.severity.toLowerCase() === sev.toLowerCase()).length
+                if (count === 0 && severityFilter !== sev) return null
+                return (
+                  <button
+                    key={sev}
+                    type="button"
+                    onClick={() => setSeverityFilter(sev)}
+                    className={`rounded px-2.5 py-1 font-mono text-[11px] transition-colors ${
+                      severityFilter === sev
+                        ? "bg-foreground text-background font-bold"
+                        : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                    }`}
+                  >
+                    {sev} ({count})
+                  </button>
+                )
+              })}
             </div>
           </div>
         </CardHeader>
 
-        <CardContent className="space-y-4">
-          {/* Target Unreachable Notice */}
-          {(scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED")) && (
-            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs text-amber-200 space-y-1.5">
-              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
-                <AlertTriangle className="size-4 text-amber-400" /> Target Host Unreachable / Offline
-              </p>
-              <p className="leading-relaxed text-amber-300/90 text-[11px]">
-                The target host <span className="font-mono text-foreground font-bold">{scanResult.target_url}</span> did not respond on HTTP or HTTPS ports (connection timed out or host is offline). No live web server responses could be inspected.
-              </p>
-              <div className="pt-1 flex flex-wrap gap-2 items-center">
-                <span className="text-[11px] text-muted-foreground">Try a live testing target:</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-6 text-[11px] px-2 text-foreground"
-                  onClick={() => navigate("agent-simulation")}
-                >
-                  <RefreshCw className="size-3 mr-1" />
-                  Try Live Target in Scanner
-                </Button>
-              </div>
+        <CardContent className="space-y-6 pt-4">
+          {filteredFindings.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-8 text-center text-xs text-muted-foreground">
+              {totalFindings === 0
+                ? "No security vulnerabilities observed for this target perimeter."
+                : "No findings match the selected severity filter."}
             </div>
-          )}
+          ) : (
+            findingsBySeverity
+              .filter((group) => {
+                if (severityFilter === "all") return group.findings.length > 0
+                return group.severity.toLowerCase() === severityFilter.toLowerCase() && group.findings.length > 0
+              })
+              .map((group) => (
+                <div key={group.severity} className="space-y-3">
+                  <div className="flex items-center gap-2 border-b border-border/50 pb-1.5">
+                    <span className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${getSeverityBadgeClass(group.severity)}`}>
+                      {group.severity} Priority
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {group.findings.length} {group.findings.length === 1 ? "finding" : "findings"}
+                    </span>
+                  </div>
 
-          {/* Inconclusive Scan Notice */}
-          {scanResult.is_inconclusive && !(scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED")) && (
-            <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-3.5 text-xs text-blue-200 space-y-1.5">
-              <p className="font-semibold text-blue-300 flex items-center gap-1.5">
-                <AlertTriangle className="size-4 text-blue-400" /> Assessment Inconclusive (Gateway / Proxy Error)
-              </p>
-              <p className="leading-relaxed text-blue-300/90 text-[11px]">
-                Target scan encountered an upstream proxy or connection error. Missing security headers are not asserted as confirmed vulnerabilities for this run.
-              </p>
-            </div>
-          )}
+                  <div className="space-y-3">
+                    {group.findings.map((finding) => {
+                      const isExpanded = !!expandedEvidence[finding.id]
+                      return (
+                        <div
+                          key={finding.id}
+                          className="rounded-lg border bg-muted/10 p-4 space-y-3 text-xs transition-colors hover:bg-muted/20"
+                        >
+                          {/* Finding Title & Badges */}
+                          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="font-semibold text-foreground text-sm">{finding.title}</h3>
+                                {finding.cwe_id && (
+                                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground border">
+                                    {finding.cwe_id}
+                                  </span>
+                                )}
+                                {finding.cve_id && (
+                                  <span className="rounded bg-destructive/15 text-destructive font-mono text-[10px] font-bold px-1.5 py-0.5 border border-destructive/30">
+                                    {finding.cve_id}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] font-mono text-muted-foreground">
+                                {finding.affected_url_or_component}
+                              </p>
+                            </div>
 
-          {/* Honest Zero Findings Disclaimer */}
-          {scanResult.zero_findings_disclaimer && (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 space-y-1">
-              <p className="font-semibold text-amber-400 flex items-center gap-1.5">
-                <Info className="size-4" /> Honest Assessment Notice
-              </p>
-              <p className="leading-relaxed text-[11px]">{scanResult.zero_findings_disclaimer}</p>
-            </div>
-          )}
+                            <span className="rounded bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground border shrink-0">
+                              {finding.category}
+                            </span>
+                          </div>
 
-          {/* Metric Bar */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-            <div className="rounded-lg border bg-muted/20 p-2.5 text-center">
-              <span className="text-[10px] text-muted-foreground block uppercase">Total Findings</span>
-              <span className="font-mono text-base font-bold text-foreground">{s.total_findings}</span>
-            </div>
-            <div className="rounded-lg border bg-muted/20 p-2.5 text-center">
-              <span className="text-[10px] text-muted-foreground block uppercase">High / Critical</span>
-              <span className="font-mono text-base font-bold text-destructive">{s.critical_count + s.high_count}</span>
-            </div>
-            <div className="rounded-lg border bg-muted/20 p-2.5 text-center">
-              <span className="text-[10px] text-muted-foreground block uppercase">Pages Crawled</span>
-              <span className="font-mono text-base font-bold text-foreground">{pagesList.length || 1}</span>
-            </div>
-            <div className="rounded-lg border bg-muted/20 p-2.5 text-center">
-              <span className="text-[10px] text-muted-foreground block uppercase">Remediation Status</span>
-              <span className={`font-mono text-base font-bold ${
-                (scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED"))
-                  ? "text-amber-400"
-                  : "text-primary"
-              }`}>
-                {(scanResult.target_unreachable || scanResult.findings?.some((f) => f.id === "VULN-SCAN-CONNECTION-FAILED"))
-                  ? "Target Unreachable"
-                  : "Ready to Plan"}
-              </span>
-            </div>
-          </div>
+                          {/* Impact & Recommended Fixes */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 text-xs">
+                            <div className="rounded bg-background/60 border p-3 space-y-1">
+                              <span className="text-[10px] uppercase font-semibold text-muted-foreground tracking-wider block">
+                                Potential Impact
+                              </span>
+                              <p className="text-foreground/90 leading-relaxed text-[11px]">
+                                {finding.potential_impact}
+                              </p>
+                            </div>
+
+                            <div className="rounded bg-primary/5 border border-primary/20 p-3 space-y-1">
+                              <span className="text-[10px] uppercase font-semibold text-primary tracking-wider block">
+                                Recommended Fix
+                              </span>
+                              <p className="text-foreground/90 leading-relaxed text-[11px]">
+                                {finding.remediation}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Evidence Toggle & References */}
+                          <div className="flex items-center justify-between pt-1 text-[11px]">
+                            <button
+                              type="button"
+                              onClick={() => toggleEvidence(finding.id)}
+                              className="text-primary hover:underline font-mono flex items-center gap-1.5 font-medium"
+                            >
+                              <Terminal className="size-3" />
+                              {isExpanded ? "Hide Wire Evidence" : "View Wire Evidence & Details"}
+                            </button>
+
+                            {finding.references && finding.references.length > 0 && (
+                              <a
+                                href={finding.references[0]}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-muted-foreground hover:text-foreground flex items-center gap-1 font-mono text-[10px]"
+                              >
+                                Guidance <ExternalLink className="size-3" />
+                              </a>
+                            )}
+                          </div>
+
+                          {/* Expandable Wire Evidence */}
+                          {isExpanded && (
+                            <div className="rounded-md bg-background border p-3 font-mono text-[11px] space-y-2.5 overflow-x-auto animate-in fade-in">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pb-2 border-b border-border/40 text-[10px]">
+                                <div>
+                                  <span className="text-muted-foreground">Check Type: </span>
+                                  <span className="text-foreground">{finding.evidence.check_type}</span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground">HTTP Status: </span>
+                                  <span className="text-foreground">{finding.evidence.status_code ?? "N/A"}</span>
+                                </div>
+                                <div className="sm:col-span-2">
+                                  <span className="text-muted-foreground">Target URL: </span>
+                                  <span className="text-foreground break-all">{finding.evidence.requested_url || finding.affected_url_or_component}</span>
+                                </div>
+                              </div>
+
+                              {(finding.evidence.observed_value || finding.evidence.expected_condition) && (
+                                <div className="rounded bg-muted/20 p-2 border border-border/40 space-y-1 text-[10px]">
+                                  {finding.evidence.observed_value && (
+                                    <div>
+                                      <span className="text-amber-400 font-semibold">Observed: </span>
+                                      <span className="text-foreground/90 break-all">{finding.evidence.observed_value}</span>
+                                    </div>
+                                  )}
+                                  {finding.evidence.expected_condition && (
+                                    <div>
+                                      <span className="text-emerald-400 font-semibold">Expected: </span>
+                                      <span className="text-foreground/90 break-all">{finding.evidence.expected_condition}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {finding.affected_urls && finding.affected_urls.length > 1 && (
+                                <div className="space-y-1 text-[10px]">
+                                  <span className="text-muted-foreground">Affected URLs ({finding.affected_urls.length}):</span>
+                                  <div className="bg-muted/20 rounded p-1.5 border border-border/30 max-h-24 overflow-y-auto space-y-0.5">
+                                    {finding.affected_urls.map((u, i) => (
+                                      <div key={i} className="text-foreground/80 truncate">
+                                        • {u}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {finding.evidence.raw_snippet && (
+                                <div>
+                                  <span className="text-muted-foreground block text-[10px] mb-1">Raw Response Snippet:</span>
+                                  <pre className="text-emerald-400 bg-black/70 rounded p-2 border border-emerald-500/20 text-[10px] whitespace-pre-wrap break-all">
+                                    {finding.evidence.raw_snippet}
+                                  </pre>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))
+          )}
         </CardContent>
       </Card>
 
       {/* ─────────────────────────────────────────────────────────────
-          FINDINGS LIST & DISCOVERED PAGES TABS
+          5. WEBSITE TRUST ASSESSMENT
       ───────────────────────────────────────────────────────────── */}
-      <div className="space-y-4">
-        <div className="flex items-center gap-2 border-b pb-2">
-          <button
-            type="button"
-            onClick={() => setActiveTab("findings")}
-            className={`flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-all ${
-              activeTab === "findings"
-                ? "bg-primary text-primary-foreground shadow"
-                : "bg-muted/40 text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <FileText className="size-3.5" />
-            Security Findings ({filteredFindings.length})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("pages")}
-            className={`flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold transition-all ${
-              activeTab === "pages"
-                ? "bg-destructive text-destructive-foreground shadow"
-                : "bg-muted/40 text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <Globe className="size-3.5" />
-            Discovered Pages ({pagesList.length})
-          </button>
-        </div>
-
-        {activeTab === "findings" && (
-          <div className="space-y-3">
-            {filteredFindings.length === 0 ? (
-              <div className="rounded-lg border border-dashed p-8 text-center text-xs text-muted-foreground">
-                No findings match the selected severity filter.
+      {scanResult.trust_assessment && (
+        <Card className="border-border bg-card shadow-sm">
+          <CardHeader className="pb-3 border-b border-border/60">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-base text-foreground flex items-center gap-2">
+                  <ShieldCheck className="size-4 text-primary" />
+                  Website Trust & Fraud Assessment
+                </CardTitle>
+                <CardDescription className="text-xs text-muted-foreground">
+                  Domain legitimacy, threat list matching, and impersonation signal verification.
+                </CardDescription>
               </div>
-            ) : (
-              filteredFindings.map((finding) => {
-                const isExpanded = !!expandedEvidence[finding.id]
+
+              <span className={`inline-flex items-center gap-1.5 rounded px-2.5 py-0.5 text-xs font-semibold uppercase ${
+                scanResult.trust_assessment.trust_state === "Known Malicious / Phishing"
+                  ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                  : scanResult.trust_assessment.trust_state === "Suspicious" || scanResult.trust_assessment.trust_state === "Likely Impersonation"
+                  ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                  : "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+              }`}>
+                {scanResult.trust_assessment.trust_state}
+              </span>
+            </div>
+          </CardHeader>
+
+          <CardContent className="space-y-4 pt-4 text-xs">
+            <div className="rounded-lg border bg-muted/10 p-3 space-y-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] font-mono text-muted-foreground">
+                <span>Canonical: <strong className="text-foreground">{scanResult.trust_assessment.canonical_url}</strong></span>
+                <span>Confidence: <strong className="text-primary uppercase">{scanResult.trust_assessment.confidence}</strong></span>
+              </div>
+              <p className="text-foreground text-xs leading-relaxed">
+                {scanResult.trust_assessment.trust_score_label}
+              </p>
+            </div>
+
+            {/* Threat Intelligence Providers Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Google Safe Browsing */}
+              {(() => {
+                const match = scanResult.trust_assessment?.threat_intel_matches.find(
+                  (m) => m.provider.toLowerCase().includes("safe browsing")
+                )
+                const status = match ? match.status : (scanResult.trust_assessment?.reputation_providers_configured ? "no_match" : "unconfigured")
                 return (
-                  <div
-                    key={finding.id}
-                    className="rounded-lg border bg-card p-4 space-y-3 text-xs transition-colors hover:bg-muted/10"
-                  >
-                    {/* Finding Header */}
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-2.5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold ${getSeverityBadgeClass(finding.severity)}`}>
-                          {finding.severity}
-                        </span>
-                        <h3 className="font-semibold text-foreground text-sm">{finding.title}</h3>
-                        {finding.cwe_id && (
-                          <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground border">
-                            {finding.cwe_id}
-                          </span>
-                        )}
-                        {finding.cve_id && (
-                          <span className="rounded bg-destructive/15 text-destructive font-mono text-[10px] font-bold px-1.5 py-0.5 border border-destructive/30">
-                            {finding.cve_id}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2 font-mono text-[10px]">
-                        <span className="rounded border px-2 py-0.5 text-muted-foreground">
-                          {finding.category}
-                        </span>
-                        <span className="rounded bg-primary/10 text-primary border border-primary/20 px-2 py-0.5 font-semibold">
-                          {finding.remediation_status}
-                        </span>
-                      </div>
+                  <div className="rounded border bg-background/50 p-3 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-foreground">Google Safe Browsing</span>
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase font-semibold ${
+                        status === "no_match"
+                          ? "bg-emerald-500/15 text-emerald-400"
+                          : status === "match_detected"
+                          ? "bg-rose-500/15 text-rose-400"
+                          : "bg-muted text-muted-foreground"
+                      }`}>
+                        {status === "no_match" ? "clean" : status === "match_detected" ? "threat match" : status}
+                      </span>
                     </div>
-
-                    {/* Impact & Action Summary */}
-                    <div className="space-y-1.5 text-muted-foreground leading-relaxed">
-                      <p>
-                        <strong className="text-foreground">Impact:</strong> {finding.potential_impact}
-                      </p>
-                      <p>
-                        <strong className="text-foreground">Recommended Fix:</strong> {finding.remediation}
-                      </p>
-                    </div>
-
-                    {/* Evidence Toggle & References */}
-                    <div className="flex items-center justify-between pt-1 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => toggleEvidence(finding.id)}
-                        className="text-primary hover:underline font-mono flex items-center gap-1 font-medium"
-                      >
-                        <Terminal className="size-3" />
-                        {isExpanded ? "Collapse Wire Evidence" : "Inspect Wire Evidence & Details"}
-                      </button>
-
-                      {finding.references && finding.references.length > 0 && (
-                        <a
-                          href={finding.references[0]}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-muted-foreground hover:text-foreground flex items-center gap-1 font-mono text-[10px]"
-                        >
-                          OWASP Reference <ExternalLink className="size-3" />
-                        </a>
-                      )}
-                    </div>
-
-                    {/* Expanded Evidence Box with secret redaction */}
-                    {isExpanded && (
-                      <div className="rounded-md bg-muted/20 border p-3 font-mono text-[11px] space-y-2.5 overflow-x-auto animate-in fade-in">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pb-2 border-b border-border/40 text-[10px]">
-                          <div>
-                            <span className="text-muted-foreground">Check Type: </span>
-                            <span className="text-foreground">{finding.evidence.check_type}</span>
-                          </div>
-                          <div>
-                            <span className="text-muted-foreground">HTTP Status: </span>
-                            <span className="text-foreground">{finding.evidence.status_code ?? "N/A"}</span>
-                          </div>
-                          <div>
-                            <span className="text-muted-foreground">Target URL: </span>
-                            <span className="text-foreground break-all">{finding.evidence.requested_url || finding.affected_url_or_component}</span>
-                          </div>
-                          <div>
-                            <span className="text-muted-foreground">Evidence Confidence: </span>
-                            <span className="text-foreground font-semibold">{finding.confidence}</span>
-                          </div>
-                          {finding.occurrence_count && finding.occurrence_count > 1 && (
-                            <div>
-                              <span className="text-muted-foreground">Occurrences: </span>
-                              <span className="text-primary font-bold">{finding.occurrence_count} instances</span>
-                            </div>
-                          )}
-                        </div>
-
-                        {(finding.evidence.observed_value || finding.evidence.expected_condition) && (
-                          <div className="rounded bg-background/80 p-2 border border-border/40 space-y-1 text-[10px]">
-                            {finding.evidence.observed_value && (
-                              <div>
-                                <span className="text-amber-400 font-semibold">Observed: </span>
-                                <span className="text-foreground/90 break-all">{finding.evidence.observed_value}</span>
-                              </div>
-                            )}
-                            {finding.evidence.expected_condition && (
-                              <div>
-                                <span className="text-emerald-400 font-semibold">Expected: </span>
-                                <span className="text-foreground/90 break-all">{finding.evidence.expected_condition}</span>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {finding.affected_urls && finding.affected_urls.length > 1 && (
-                          <div>
-                            <p className="text-muted-foreground mb-1 text-[10px]">// Affected URLs ({finding.affected_urls.length}):</p>
-                            <div className="bg-background/80 rounded p-1.5 border border-border/30 space-y-0.5 text-[10px] max-h-24 overflow-y-auto">
-                              {finding.affected_urls.map((u, i) => (
-                                <div key={i} className="text-primary truncate font-mono">
-                                  • {u}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {finding.evidence.raw_snippet && (
-                          <div>
-                            <p className="text-muted-foreground mb-0.5 text-[10px]">// Raw Wire Snippet:</p>
-                            <p className="text-emerald-400 bg-black/60 rounded p-2 border border-emerald-500/20 break-all text-[10px]">
-                              {finding.evidence.raw_snippet}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    <p className="text-[11px] text-muted-foreground">
+                      {status === "no_match"
+                        ? "No malicious entry found in threat lists."
+                        : match?.details || "Lookup complete."}
+                    </p>
                   </div>
                 )
-              })
-            )}
-          </div>
-        )}
+              })()}
 
-        {activeTab === "pages" && (
-          <Card className="border-border bg-card">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base text-foreground">Discovered Pages Inventory</CardTitle>
-              <CardDescription className="text-xs text-muted-foreground">
-                All URLs crawled within the permitted target scope during this assessment.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {pagesList.length === 0 ? (
-                <div className="rounded-lg border border-dashed p-8 text-center text-xs text-muted-foreground">
-                  No additional internal pages discovered. Target landing was evaluated.
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {pagesList.map((pg, idx) => (
-                    <div key={idx} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded border bg-muted/15 p-2.5 text-xs font-mono">
-                      <div className="flex items-center gap-2 truncate max-w-xl">
-                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${pg.status_code && pg.status_code < 400 ? "bg-emerald-500/15 text-emerald-400" : "bg-destructive/15 text-destructive"}`}>
-                          {pg.status_code ? `HTTP ${pg.status_code}` : "Rendered"}
-                        </span>
-                        <span className="text-foreground truncate">{pg.url}</span>
+              {/* PhishTank */}
+              {(() => {
+                const match = scanResult.trust_assessment?.threat_intel_matches.find(
+                  (m) => m.provider.toLowerCase().includes("phishtank")
+                )
+                const status = match ? match.status : (scanResult.trust_assessment?.reputation_providers_configured ? "no_match" : "unconfigured")
+                return (
+                  <div className="rounded border bg-background/50 p-3 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-foreground">PhishTank Directory</span>
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase font-semibold ${
+                        status === "no_match"
+                          ? "bg-emerald-500/15 text-emerald-400"
+                          : status === "match_detected"
+                          ? "bg-rose-500/15 text-rose-400"
+                          : "bg-muted text-muted-foreground"
+                      }`}>
+                        {status === "no_match" ? "clean" : status === "match_detected" ? "threat match" : status}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {status === "no_match"
+                        ? "Not listed in phishing repository."
+                        : match?.details || "Lookup complete."}
+                    </p>
+                  </div>
+                )
+              })()}
+            </div>
+
+            {/* Impersonation Signals (if any) */}
+            {scanResult.trust_assessment.impersonation_signals && scanResult.trust_assessment.impersonation_signals.length > 0 && (
+              <div className="space-y-2 pt-1">
+                <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider block">
+                  Impersonation Signals ({scanResult.trust_assessment.impersonation_signals.length})
+                </span>
+                <div className="space-y-1.5">
+                  {scanResult.trust_assessment.impersonation_signals.map((sig, idx) => (
+                    <div key={idx} className="rounded border bg-muted/15 p-2.5 text-xs flex items-start gap-2">
+                      <AlertTriangle className="size-3.5 text-amber-400 shrink-0 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <span className="font-semibold text-foreground">{sig.signal_type.replace(/_/g, " ")}: </span>
+                        <span className="text-muted-foreground">{sig.description}</span>
                       </div>
-                      <span className="text-muted-foreground text-[10px]">Depth: {pg.depth}</span>
                     </div>
                   ))}
                 </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ─────────────────────────────────────────────────────────────
+          6. CRAWL COVERAGE
+      ───────────────────────────────────────────────────────────── */}
+      <Card className="border-border bg-card shadow-sm">
+        <CardHeader className="pb-3 border-b border-border/60">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base text-foreground flex items-center gap-2">
+                <Globe className="size-4 text-primary" />
+                Crawl Coverage & Discovered Pages
+              </CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                Inventory of pages analyzed by the headless Playwright crawler.
+              </CardDescription>
+            </div>
+            <span className="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground">
+              {pagesList.length} {pagesList.length === 1 ? "page" : "pages"}
+            </span>
+          </div>
+        </CardHeader>
+
+        <CardContent className="pt-4">
+          {pagesList.length === 0 ? (
+            <div className="rounded border border-dashed p-6 text-center text-xs text-muted-foreground font-mono">
+              Target origin landing page evaluated.
+            </div>
+          ) : (
+            <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+              {pagesList.map((pg, idx) => (
+                <div
+                  key={idx}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded border bg-muted/10 p-2 text-xs font-mono"
+                >
+                  <div className="flex items-center gap-2 truncate min-w-0">
+                    <span className={`rounded px-1.5 py-0.2 text-[10px] font-bold shrink-0 ${
+                      pg.status_code && pg.status_code < 400
+                        ? "bg-emerald-500/15 text-emerald-400"
+                        : "bg-destructive/15 text-destructive"
+                    }`}>
+                      {pg.status_code ? `HTTP ${pg.status_code}` : "200"}
+                    </span>
+                    <span className="text-foreground truncate" title={pg.url}>
+                      {pg.url}
+                    </span>
+                  </div>
+                  <span className="text-muted-foreground text-[10px] shrink-0">
+                    depth {pg.depth}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ─────────────────────────────────────────────────────────────
+          7. BOTTOM NAVIGATION: RETURN TO EXECUTIVE OVERVIEW ONLY
+      ───────────────────────────────────────────────────────────── */}
+      <div className="flex justify-end pt-4">
+        <Button
+          onClick={() => {
+            if (scanResult) {
+              recordCompletedScan(scanResult)
+            }
+            navigate("overview", undefined, scanResult?.scan_id)
+          }}
+          className="h-9 gap-2 px-5 text-xs font-semibold bg-primary text-primary-foreground hover:bg-primary/90"
+        >
+          Executive Overview
+          <ArrowRight className="size-3.5" />
+        </Button>
       </div>
     </div>
   )
 }
+

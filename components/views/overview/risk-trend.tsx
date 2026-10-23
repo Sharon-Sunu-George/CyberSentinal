@@ -17,7 +17,7 @@ function formatISTDay(date: Date): string {
 }
 
 export function RiskTrend({ className }: { className?: string }) {
-  const { assessment, activeReport } = useAppState()
+  const { assessment, activeReport, activeWebsiteScan } = useAppState()
 
   const data = useMemo(() => {
     // Anchor to actual assessment timestamp or now, formatted dynamically in Asia/Kolkata (IST)
@@ -54,14 +54,22 @@ export function RiskTrend({ className }: { className?: string }) {
   return (
     <Panel
       className={className}
-      title={activeReport ? "Risk Posture Progression" : "Seven-Day Risk Trend"}
+      title={activeWebsiteScan ? "Perimeter Risk Posture Progression" : activeReport ? "Risk Posture Progression" : "Seven-Day Risk Trend"}
       description={
-        activeReport
+        activeWebsiteScan
+          ? `Authoritative risk score ${assessment.overallScore}/100 derived from ${activeWebsiteScan.normalized_url || activeWebsiteScan.target_url} (Scan ID: ${activeWebsiteScan.scan_id}).`
+          : activeReport
           ? `Authoritative risk score ${assessment.overallScore}/100 derived from ${activeReport.filename || activeReport.report_id}.`
           : `Official risk score is ${assessment.overallScore}/100 (${isUp ? "+" : ""}${change} pts over 7 days). Reference line marks Critical threshold (80).`
       }
       action={
         <div className="flex flex-wrap items-center gap-2">
+          {activeWebsiteScan && (
+            <span className="flex items-center gap-1.5 font-mono text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5">
+              <CheckCircle2 className="size-3 text-emerald-500" />
+              Website Scan ({currentDayLabel})
+            </span>
+          )}
           {activeReport && (
             <span className="flex items-center gap-1.5 font-mono text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5">
               <CheckCircle2 className="size-3 text-emerald-500" />

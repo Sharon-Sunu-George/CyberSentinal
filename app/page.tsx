@@ -30,7 +30,9 @@ function DashboardContent() {
     view === "risk-assessment" ||
     view === "report-upload" ||
     view === "report-analysis" ||
-    view === "agent-simulation"
+    view === "agent-simulation" ||
+    view === "assessment-report" ||
+    view === "remediation-center"
   ) {
     return (
       <main className="min-h-svh w-full bg-background text-foreground">
@@ -39,6 +41,16 @@ function DashboardContent() {
         {view === "report-upload" && <ReportUploadView />}
         {view === "report-analysis" && <ReportAnalysisView />}
         {view === "agent-simulation" && <AgentSimulationView />}
+        {view === "assessment-report" && (
+          <div className="p-4 lg:p-6">
+            <AssessmentReportView />
+          </div>
+        )}
+        {view === "remediation-center" && (
+          <div className="p-4 lg:p-6">
+            <RemediationCenterView />
+          </div>
+        )}
       </main>
     )
   }
@@ -52,8 +64,6 @@ function DashboardContent() {
         <main className="flex-1 p-4 lg:p-6">
           {view === "dashboard" && <DashboardView />}
           {view === "new-assessment" && <NewAssessmentView />}
-          {view === "assessment-report" && <AssessmentReportView />}
-          {view === "remediation-center" && <RemediationCenterView />}
           {view === "assessment-history" && <AssessmentHistoryView />}
           {view === "overview" && <OverviewView />}
           {view === "explorer" && <ExplorerView />}

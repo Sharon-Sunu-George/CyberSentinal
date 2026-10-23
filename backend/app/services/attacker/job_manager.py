@@ -272,6 +272,12 @@ class ScanJobManager:
                 return
 
             # Step 2: Also run baseline socket/transport checks on the origin
+            with self._lock:
+                if not job.cancelled:
+                    job.progress_data.update({
+                        "message": "Performing SSL/TLS and transport security analysis…",
+                        "progress_percentage": max(job.progress_data.get("progress_percentage", 0), 85),
+                    })
             agent_service = AttackerAgentService()
             try:
                 base_findings, base_meta = agent_service.scanner.scan(job.request.target_url)
@@ -281,6 +287,14 @@ class ScanJobManager:
 
             # Step 3: Combine and deduplicate findings across crawl and socket probes
             all_findings = deduplicate_findings(crawl_findings + base_findings)
+
+            with self._lock:
+                if not job.cancelled:
+                    job.progress_data.update({
+                        "message": "Evaluating website trust and threat intelligence…",
+                        "progress_percentage": 92,
+                        "findings_count": len(all_findings),
+                    })
 
             summary = agent_service._compute_summary(all_findings)
             summary.pages_discovered = crawl_summary["pages_discovered"]
@@ -353,6 +367,24 @@ class ScanJobManager:
                 "inferred_attack_scenarios": [s.model_dump() for s in inferred_scenarios],
                 "trust_assessment": trust_assessment.model_dump(),
             })
+
+            # Automatically compute and persist initial Defender remediation plan and baseline risk score
+            try:
+                from app.services.defender.engine import DefenderPrioritizationEngine
+                from app.schemas.defender import DefenderAnalysisRequest
+                def_engine = DefenderPrioritizationEngine(hourly_rate=125.0)
+                def_req = DefenderAnalysisRequest(
+                    scan_id=scan_id,
+                    target_url=crawl_summary["normalized_url"],
+                    findings=[f.model_dump() for f in all_findings],
+                    available_budget=5000.0,
+                    hourly_rate=125.0,
+                    currency="USD",
+                )
+                def_engine.analyze(def_req)
+            except Exception as plan_err:
+                logger.warning(f"Initial remediation plan generation skipped: {str(plan_err)}")
+
 
             with self._lock:
                 job.status = "completed"

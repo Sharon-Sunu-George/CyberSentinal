@@ -88,7 +88,7 @@ interface DefenseSimulationResult {
 }
 
 export function AgentSimulationView() {
-  const { navigate, dataset } = useAppState()
+  const { navigate, dataset, recordCompletedScan } = useAppState()
 
   // Main Mode: Real Website Scanner (Live) vs Simulated Scenario Demo
   const [activeMode, setActiveMode] = useState<"live_assessment" | "simulation_demo">("live_assessment")
@@ -295,6 +295,9 @@ export function AgentSimulationView() {
             // Handover actual findings to Defender Agent
             runDefenderAnalysis(fullRecord.scan_id, fullRecord.target_url, fullRecord.findings, availableBudget, hourlyRate)
 
+            // Update global application state with the completed assessment scan
+            recordCompletedScan(fullRecord)
+
             // Navigate to dedicated results page for this specific scan
             navigate("assessment-report", undefined, scanId)
           } else if (prog.status === "failed") {
@@ -381,6 +384,7 @@ export function AgentSimulationView() {
               setDiscoveredPagesList(fullRecord.discovered_pages)
             }
             runDefenderAnalysis(fullRecord.scan_id, fullRecord.target_url, fullRecord.findings, availableBudget, hourlyRate)
+            recordCompletedScan(fullRecord)
           } else if (prog.status === "failed" || prog.status === "cancelled") {
             stopPolling()
             setIsScanning(false)
@@ -889,7 +893,7 @@ export function AgentSimulationView() {
                   </span>
                 </div>
                 <CardDescription className="text-xs text-foreground/80 mt-1 leading-relaxed">
-                  The <strong>Attack Surface Scanner</strong> executes real passive socket/TLS and header inspections against your explicitly authorized web perimeter.
+                  The <strong>Real Website Assessment</strong> executes real passive socket/TLS and header inspections against your explicitly authorized web perimeter.
                   The <strong>Remediation Planner</strong> consumes concrete findings, calculates technical implementation costs, and prioritizes remediation to maximize risk reduction within your budget.
                 </CardDescription>
               </CardHeader>
@@ -897,13 +901,13 @@ export function AgentSimulationView() {
 
             {/* Side-by-side Dual Panels */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* PANEL 1: ATTACK SURFACE SCANNER */}
+              {/* PANEL 1: REAL WEBSITE ASSESSMENT */}
               <Card className="border-destructive/30 bg-card flex flex-col justify-between">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-destructive font-semibold text-base">
                       <Sparkles className="size-5" />
-                      <span>Attack Surface Scanner — Real Website Assessment</span>
+                      <span>Real Website Assessment</span>
                     </div>
                     {scanStatus === "running" && (
                       <span className="text-[11px] font-mono font-semibold text-destructive flex items-center gap-1">
@@ -1232,7 +1236,7 @@ export function AgentSimulationView() {
                   {!scanResult && (
                     <div className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground space-y-2">
                       <Workflow className="size-8 mx-auto text-muted-foreground/50" />
-                      <p className="font-semibold text-foreground">Waiting for Attack Surface Findings</p>
+                      <p className="font-semibold text-foreground">Waiting for real website findings</p>
                       <p className="text-[11px] max-w-xs mx-auto">
                         Initiate a scan against your authorized website on the left. The Remediation Planner will immediately ingest the empirical findings and formulate an actionable plan.
                       </p>

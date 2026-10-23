@@ -136,7 +136,25 @@ class AttackerAgentService:
             "trust_assessment": trust_assessment.model_dump(),
         })
 
+        # Automatically compute and persist initial Defender plan and baseline risk score
+        try:
+            from app.services.defender.engine import DefenderPrioritizationEngine
+            from app.schemas.defender import DefenderAnalysisRequest
+            def_engine = DefenderPrioritizationEngine(hourly_rate=125.0)
+            def_req = DefenderAnalysisRequest(
+                scan_id=actual_scan_id,
+                target_url=normalized_url,
+                findings=[f.model_dump() for f in findings],
+                available_budget=5000.0,
+                hourly_rate=125.0,
+                currency="USD",
+            )
+            def_engine.analyze(def_req)
+        except Exception as plan_err:
+            logger.warning(f"Initial remediation plan generation skipped: {str(plan_err)}")
+
         return response
+
 
     @staticmethod
     def _compute_summary(findings: List[VulnerabilityFinding]) -> AttackerScanSummary:

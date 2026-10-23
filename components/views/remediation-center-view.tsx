@@ -311,14 +311,6 @@ export function RemediationCenterView({ scanId: propScanId }: { scanId?: string 
           >
             <FileText className="size-3" /> View Findings Report
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => navigate("overview")}
-            className="h-8 gap-1.5 text-xs"
-          >
-            Overview
-          </Button>
         </div>
       </div>
 
