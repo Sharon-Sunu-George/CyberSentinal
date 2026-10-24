@@ -15,6 +15,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "CyberSentinal — Security Operations",
   description: "Monitor threats, alerts, and assets across your environment in real time.",
+  icons: {
+    icon: "/favicon.ico",
+    apple: "/logo.png",
+  },
 };
 
 export const viewport: Viewport = {
