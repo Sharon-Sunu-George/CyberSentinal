@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency definition
-COPY requirements.txt .
+# Copy dependency definition from backend/ directory in repository-root build context
+COPY backend/requirements.txt requirements.txt
 
 # Install dependencies (filter out Windows-specific winocr gracefully on Linux)
 RUN grep -v "winocr" requirements.txt > requirements-linux.txt && \
@@ -26,8 +26,8 @@ RUN grep -v "winocr" requirements.txt > requirements-linux.txt && \
 # Install Playwright Chromium engine and only its required OS system libraries
 RUN playwright install --with-deps chromium
 
-# Copy application source code
-COPY . .
+# Copy application source code from backend/ directory into /app
+COPY backend/ .
 
 # Expose container port (default 8010, overridden at runtime via $PORT)
 EXPOSE 8010
