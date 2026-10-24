@@ -20,6 +20,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAppState } from "@/components/app/app-state"
 import { CURRENCY_CONFIGS, RATES_LAST_UPDATED } from "@/lib/format"
 import type { CurrencyCode } from "@/lib/types"
+import { apiClient } from "@/lib/api-client"
 
 interface AIStatus {
   provider_name: string
@@ -63,11 +64,8 @@ export function SettingsView() {
 
   // Fetch AI status from backend
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/v1/settings/ai-status")
-      .then((res) => {
-        if (res.ok) return res.json()
-        throw new Error("Failed to load AI status")
-      })
+    apiClient
+      .getAiStatus()
       .then((data: AIStatus) => setAiStatus(data))
       .catch(() => {
         // Keeps local fallback status
@@ -82,9 +80,7 @@ export function SettingsView() {
 
     try {
       // Notify backend endpoint
-      await fetch("http://127.0.0.1:8000/api/v1/settings/run-scenario", {
-        method: "POST",
-      }).catch(() => {})
+      await apiClient.runScenario().catch(() => {})
 
       // Trigger state change
       simulateThreat()
@@ -99,9 +95,7 @@ export function SettingsView() {
   const handleConfirmReset = async () => {
     setIsResetting(true)
     try {
-      await fetch("http://127.0.0.1:8000/api/v1/settings/reset-dataset", {
-        method: "POST",
-      }).catch(() => {})
+      await apiClient.resetDataset().catch(() => {})
 
       reset()
       setResetSuccess(true)

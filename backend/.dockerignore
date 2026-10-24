@@ -1,0 +1,15 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+cybersentinel.db
+cybersentinel.db*
+*.db
+*.sqlite3
+.env
+.env.*
+tests

@@ -14,10 +14,13 @@ import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-DB_FILE = Path(__file__).resolve().parent.parent.parent / "cybersentinel.db"
+DB_PATH_ENV = os.getenv("DATABASE_PATH")
+DB_FILE = Path(DB_PATH_ENV).resolve() if DB_PATH_ENV else Path(__file__).resolve().parent.parent.parent / "cybersentinel.db"
 
 
 def get_db_connection() -> sqlite3.Connection:
+    if not DB_FILE.parent.exists():
+        DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_FILE))
     conn.row_factory = sqlite3.Row
     return conn

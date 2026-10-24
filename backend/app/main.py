@@ -14,11 +14,16 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Enable CORS for React frontend integration during hackathon
+import os
+
+# CORS configuration: Allow specific origins in production via CORS_ORIGINS, or default to all origins
+cors_origins_env = os.getenv("CORS_ORIGINS")
+allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] if cors_origins_env else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production if necessary
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=True if allowed_origins != ["*"] else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
