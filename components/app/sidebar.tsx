@@ -5,9 +5,19 @@ import { cn } from "@/lib/utils"
 import { useAppState } from "./app-state"
 import { NAV_ITEMS } from "./nav-config"
 
-export function Logo() {
+export function Logo({ onClick }: { onClick?: () => void }) {
+  const { navigate } = useAppState()
   return (
-    <div className="flex items-center gap-2.5">
+    <div
+      onClick={() => {
+        if (onClick) onClick()
+        else navigate("landing")
+      }}
+      className="flex items-center gap-2.5 cursor-pointer select-none transition-opacity hover:opacity-85"
+      role="button"
+      tabIndex={0}
+      title="CyberSentinel AI — Return to Home / Welcome Screen"
+    >
       <span className="flex size-8 items-center justify-center rounded-md bg-primary/15 text-primary ring-1 ring-inset ring-primary/30">
         <ShieldCheck className="size-4.5" aria-hidden="true" />
       </span>

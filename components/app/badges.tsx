@@ -75,7 +75,7 @@ export function RiskScore({ score, className }: { score: number; className?: str
   )
 }
 
-export function DemoTag({ className }: { className?: string }) {
+export function DemoTag({ className, label = "Demo" }: { className?: string; label?: string }) {
   return (
     <span
       className={cn(
@@ -83,7 +83,7 @@ export function DemoTag({ className }: { className?: string }) {
         className,
       )}
     >
-      Demo
+      {label}
     </span>
   )
 }

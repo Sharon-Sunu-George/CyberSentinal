@@ -14,11 +14,16 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Enable CORS for React frontend integration during hackathon
+import os
+
+# CORS configuration: Allow specific origins in production via CORS_ORIGINS, or default to all origins
+cors_origins_env = os.getenv("CORS_ORIGINS")
+allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] if cors_origins_env else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production if necessary
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=True if allowed_origins != ["*"] else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,4 +41,28 @@ def root():
         "message": "Welcome to CyberQuant Engine API",
         "documentation": "/docs",
         "api_v1_prefix": "/api/v1"
+    }
+
+
+@app.get("/health", tags=["Health"])
+def health():
+    """
+    Operational health and readiness probe.
+    Checks application status and database availability.
+    """
+    from app.services.storage import get_db_connection
+    db_status = "healthy"
+    try:
+        conn = get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+    except Exception as e:
+        db_status = f"unhealthy: {str(e)}"
+
+    return {
+        "status": "healthy" if db_status == "healthy" else "degraded",
+        "app": "CyberSentinal API",
+        "version": "1.0.0",
+        "database": db_status,
+        "mode": "standalone-server",
     }
